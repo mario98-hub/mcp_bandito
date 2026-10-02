@@ -1,0 +1,26 @@
+# fly launch --no-deploy --copy-config && fly volumes create conti_data --size 1
+app = "conti-mcp"
+primary_region = "fra"
+
+[build]
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "3333"
+  CONTI_DB = "/data/conti.db"
+
+[mounts]
+  source = "conti_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 3333
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[http_service.checks]]
+  path = "/health"
+  interval = "30s"
+  timeout = "3s"

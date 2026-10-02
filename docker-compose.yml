@@ -1,0 +1,14 @@
+services:
+  conti:
+    build: .
+    # or: image: ghcr.io/<you>/conti-mcp:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3333:3333"
+    environment:
+      CONTI_TOKEN: ${CONTI_TOKEN:?set CONTI_TOKEN (npx conti-mcp --new-token)}
+      CONTI_ALLOWED_HOSTS: ${CONTI_ALLOWED_HOSTS:-}
+    volumes:
+      - conti-data:/data
+volumes:
+  conti-data:
