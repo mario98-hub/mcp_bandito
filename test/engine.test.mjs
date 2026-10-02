@@ -1,6 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compute, PMT, PV, attribute, simulateHome, simulatePurchase, loanPayment } from '../dist/core/engine.js';
+import {
+  compute,
+  PMT,
+  PV,
+  attribute,
+  simulateHome,
+  simulatePurchase,
+  loanPayment,
+  maxLoan,
+  onboardingNext,
+  resolveModules,
+  goalProgress,
+  purchaseBudget,
+} from '../dist/core/engine.js';
 import { demoState } from '../dist/core/demo.js';
 import { emptyState, SHARED } from '../dist/core/types.js';
 import { fromLegacy } from '../dist/core/legacy.js';
@@ -146,4 +159,121 @@ test('legacy "Conti congiunti" backup import', () => {
   assert.equal(st.budget.find((b) => b.name === 'Assicurazione').dueMonth, 3);
   assert.equal(st.budget.find((b) => b.name === 'ETF').kind, 'saving');
   assert.equal(st.scenarios[0].capitalUse.m_a, 0.8);
+});
+
+// ---------------------------------------------------------------- v0.2
+
+test('onboardingNext derives the next step from the data', () => {
+  const s = emptyState();
+  assert.equal(onboardingNext(s).next.id, 'who');
+  assert.equal(onboardingNext(s).onboarded, false);
+
+  s.household = { name: 'H', currency: 'EUR', locale: 'it', createdAt: 'x' };
+  s.members = [{ id: 'a', name: 'A' }];
+  assert.equal(onboardingNext(s).next.id, 'goal');
+
+  s.goals = [{ id: 'g1', kind: 'emergency', primary: true, accountIds: [], status: 'active' }];
+  assert.equal(onboardingNext(s).next.id, 'accounts');
+
+  // an account with no balance snapshot does not satisfy step 3
+  s.accounts = [{ id: 'x', name: 'X', kind: 'cash', owners: [{ memberId: 'a', share: 1 }], liquid: true }];
+  assert.equal(onboardingNext(s).next.id, 'accounts');
+
+  s.snapshots = [{ accountId: 'x', month: '2026-01', balance: 1000 }];
+  assert.equal(onboardingNext(s).next.id, 'income');
+  assert.equal(onboardingNext(s).onboarded, false);
+
+  s.incomes = [{ memberId: 'a', month: '2026-01', net: 2000 }];
+  const r = onboardingNext(s);
+  assert.equal(r.complete, true);
+  assert.equal(r.onboarded, true);
+  // emergency goal needs no amount (step 6 done); reminder not set → next is reminder
+  assert.equal(r.next.id, 'reminder');
+  assert.equal(r.steps.find((x) => x.id === 'goal').done, true);
+});
+
+test('resolveModules: auto from data, forced on/off', () => {
+  const s = emptyState();
+  s.accounts = [{ id: 'x', name: 'X', kind: 'cash', owners: [], liquid: true }];
+  assert.deepEqual(resolveModules(s), { invest: false, home: false, debt: false, fixed: false });
+
+  s.accounts.push({ id: 'd', name: 'Loan', kind: 'debt', owners: [], liquid: false });
+  assert.equal(resolveModules(s).debt, true);
+
+  s.accounts.push({ id: 'i', name: 'ETF', kind: 'investment', owners: [], liquid: true });
+  assert.equal(resolveModules(s).invest, true);
+
+  s.budget = [{ id: 'b', name: 'Rent', amount: 800, frequency: 'monthly', kind: 'expense' }];
+  assert.equal(resolveModules(s).fixed, true);
+
+  // manual override wins over the data
+  s.settings.modules = { ...s.settings.modules, invest: 'off' };
+  assert.equal(resolveModules(s).invest, false);
+
+  // force a module on with no supporting data
+  const s2 = emptyState();
+  s2.settings.modules = { ...s2.settings.modules, home: 'on' };
+  assert.equal(resolveModules(s2).home, true);
+});
+
+test('goalProgress: linked accounts and primary-first pool', () => {
+  const s = emptyState();
+  s.members = [{ id: 'a', name: 'A' }];
+  s.accounts = [
+    { id: 'cash', name: 'Cash', kind: 'cash', owners: [{ memberId: 'a', share: 1 }], liquid: true },
+    { id: 'save', name: 'Savings', kind: 'cash', owners: [{ memberId: 'a', share: 1 }], liquid: true },
+  ];
+  s.snapshots = [
+    { accountId: 'cash', month: '2026-01', balance: 10000 },
+    { accountId: 'save', month: '2026-01', balance: 4000 },
+    { accountId: 'cash', month: '2026-02', balance: 10000 },
+    { accountId: 'save', month: '2026-02', balance: 5000 },
+  ];
+  s.incomes = [
+    { memberId: 'a', month: '2026-01', net: 3000 },
+    { memberId: 'a', month: '2026-02', net: 3000 },
+  ];
+  const c = compute(s, { today: '2026-02' });
+
+  // linked goal: accumulated = realizable of the linked account
+  const linked = { id: 'g-save', kind: 'purchase', primary: false, accountIds: ['save'], targetAmount: 10000, status: 'active' };
+  s.goals = [linked];
+  const gp = goalProgress(s, c, linked);
+  close(gp.accumulated, 5000);
+  close(gp.pct, 0.5);
+
+  // two unlinked goals share the pool, primary first
+  const pool = Math.max(0, c.netWorth.liquid - s.settings.emergencyMonths * c.flows.household.avgSpending);
+  const primary = { id: 'g1', kind: 'home', primary: true, accountIds: [], targetAmount: 1000, status: 'active' };
+  const second = { id: 'g2', kind: 'purchase', primary: false, accountIds: [], status: 'active' };
+  s.goals = [primary, second];
+  close(goalProgress(s, c, primary).accumulated, Math.min(1000, pool));
+  close(goalProgress(s, c, second).accumulated, Math.max(0, pool - Math.min(1000, pool)));
+});
+
+test('purchaseBudget: cash keeps the emergency fund, financing respects the ratio', () => {
+  const s = emptyState();
+  s.members = [{ id: 'a', name: 'A' }];
+  s.accounts = [{ id: 'cash', name: 'Cash', kind: 'cash', owners: [{ memberId: 'a', share: 1 }], liquid: true }];
+  s.snapshots = [
+    { accountId: 'cash', month: '2026-01', balance: 20000 },
+    { accountId: 'cash', month: '2026-02', balance: 21000 },
+  ];
+  s.incomes = [
+    { memberId: 'a', month: '2026-01', net: 3000 },
+    { memberId: 'a', month: '2026-02', net: 3000 },
+  ];
+  const c = compute(s, { today: '2026-02' });
+  const spend = c.flows.household.avgSpending;
+
+  const b = purchaseBudget(s, c, {});
+  close(b.maxCash, Math.max(0, c.netWorth.cash - s.settings.emergencyMonths * spend));
+  assert.equal(b.maxFinanced, null); // no years → no financing option
+  assert.equal(b.reasons.length, 0);
+
+  const bf = purchaseBudget(s, c, { rate: 0.06, years: 5, monthlyRunningCost: 100 });
+  const ceiling = c.flows.household.avgIncome * s.settings.maxPaymentRatio;
+  close(bf.monthlyPaymentCeiling, ceiling);
+  close(bf.maxLoanAmount, maxLoan(Math.max(0, ceiling - 100), 0.06, 5));
+  close(bf.maxFinanced, bf.maxCash + bf.maxLoanAmount);
 });
