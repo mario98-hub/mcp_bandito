@@ -11,19 +11,23 @@ import { z } from 'zod';
 import { Store, newId, slug } from '../store/store.js';
 import {
   compute,
+  goalProgress,
   isMonthKey,
   isNum,
   mk,
+  onboardingNext,
+  purchaseBudget,
+  resolveModules,
   simulateHome,
   simulatePurchase,
   type Computed,
 } from '../core/engine.js';
-import { SHARED, type Account, type HomeScenario, type Locale, type State } from '../core/types.js';
+import { SHARED, type Account, type Goal, type HomeScenario, type Locale, type State } from '../core/types.js';
 import { t, money, pct, num, monthLabel } from '../core/i18n.js';
 import { fromLegacy, isLegacyBackup } from '../core/legacy.js';
 import { buildView } from './view.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 export const UI_URI = 'ui://conti/dashboard.html';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -37,9 +41,10 @@ function loadUiHtml(): string {
 const INSTRUCTIONS = `Conti keeps a household's finances in order with one snapshot a month: account balances and each person's net income. Savings, spending, savings rate, net worth, emergency fund and purchase affordability are derived from those numbers.
 
 How to help the user:
-- First time (conti_get_overview says "not set up"): ask who is in the household and which accounts they have, then call conti_setup.
+- First time (conti_get_overview says "not set up"): run the guided setup. Call conti_onboarding to get the next step, then work through it: who is in the household and their main goal (conti_setup, conti_set_goal), the accounts and the monthly income (conti_setup / conti_record_month), then show the first dashboard. Call conti_onboarding again after each step to get the next one; steps 6-7 (goal details, monthly reminder) are optional.
+- Goals: the primary goal shapes the dashboard and the tone. Use conti_set_goal to create or update it and to set a target amount/date or link the accounts that count towards it. conti_get_overview reports each goal's progress and estimated date.
 - Monthly routine: the user sends screenshots or numbers. Read every balance (and unrealized gain for investment accounts, if shown) and each person's net pay, then call conti_record_month. If a figure is ambiguous, ask before saving. After saving, mention what is still missing for that month.
-- Questions about money ("can we afford…", "how are we doing", "how much do we save"): call conti_get_overview, conti_health_check, conti_simulate_purchase or conti_home_scenario and answer with the numbers. Explain the reasoning in plain words so the user learns, and say which assumptions matter. You are not a licensed advisor: give information and trade-offs, not orders.
+- Questions about money ("can we afford…", "how much can we spend", "how are we doing", "how much do we save"): call conti_get_overview, conti_health_check, conti_simulate_purchase, conti_purchase_budget or conti_home_scenario and answer with the numbers. Explain the reasoning in plain words so the user learns, and say which assumptions matter. You are not a licensed advisor: give information and trade-offs, not orders.
 - Show the dashboard (conti_dashboard) when a visual helps, e.g. after recording a month or when asked "show me".
 Amounts are in the household currency. Debts are negative balances. Month keys are YYYY-MM.`;
 
@@ -77,11 +82,12 @@ function uniqueId(base: string, taken: Set<string>) {
 }
 
 const ownerName = (st: State, id: string, L: Locale) => (id === SHARED ? t(L).shared : st.members.find((m) => m.id === id)?.name ?? id);
+const goalLabel = (g: Goal, L: Locale) => g.name ?? t(L).goals.kinds[g.kind];
 
 function overviewText(st: State, c: Computed, L: Locale): string {
   const T = t(L);
   const cur = c.currency;
-  if (!st.household || !st.members.length) return 'Conti is not set up yet. Ask the user who is in the household and which accounts they have, then call conti_setup.';
+  if (!st.household || !st.members.length) return 'Conti is not set up yet. Call conti_onboarding for the next guided step: ask who is in the household and their main goal, then call conti_setup and conti_set_goal.';
   const lines: string[] = [];
   lines.push(`# ${st.household.name}`);
   if (!c.latestMonth) {
@@ -111,6 +117,21 @@ function overviewText(st: State, c: Computed, L: Locale): string {
   lines.push(`This month (${monthLabel(s.month, L)}): ${s.overall === 'ok' ? 'complete' : `missing ${miss.join(', ')}`}.`);
   lines.push(`Health: ${c.health.map((h) => `${T.health[h.id].name} ${fmtMetric(h.id, h.value, L)} (${T.hs[h.status]})`).join(' · ')}`);
   if (st.budget.length) lines.push(`Budget: fixed ${money(c.budget.fixedMonthlyEquivalent, cur, L)}/month incl. yearly items; planned savings ${money(c.budget.plannedSavings, cur, L)}/month.`);
+  const activeGoals = st.goals.filter((g) => g.status !== 'archived');
+  if (activeGoals.length) {
+    lines.push(
+      `${T.goals.title}: ` +
+        activeGoals
+          .map((g) => {
+            const gp = goalProgress(st, c, g);
+            const prog = isNum(gp.target)
+              ? `${pct(gp.pct, L)} (${money(gp.accumulated, cur, L)}/${money(gp.target, cur, L)}${gp.etaDate ? `, ${monthLabel(gp.etaDate, L)}` : ''})`
+              : money(gp.accumulated, cur, L);
+            return `${g.primary ? '★ ' : ''}${goalLabel(g, L)} ${prog}`;
+          })
+          .join(' · '),
+    );
+  }
   return lines.join('\n');
 }
 
@@ -124,6 +145,8 @@ function fmtMetric(id: string, v: number | null, L: Locale) {
 // ----------------------------------------------------------------- schemas
 
 const kindEnum = z.enum(['cash', 'investment', 'pension', 'property', 'debt', 'other']);
+const goalKindEnum = z.enum(['spending', 'emergency', 'home', 'invest', 'debt', 'purchase']);
+const moduleModeEnum = z.enum(['auto', 'on', 'off']);
 const ownerSchema = z.object({
   member: z.string().describe('Member id or name'),
   share: z.number().min(0).max(1).default(1).describe('Fraction owned, 0..1'),
@@ -232,11 +255,14 @@ export function createServer({ store }: ServerOptions): McpServer {
       const { st, L, c } = load();
       return ok(overviewText(st, c, L), {
         setUp: !!st.household,
+        onboarding: onboardingNext(st),
+        modules: resolveModules(st),
         members: st.members,
         accounts: st.accounts.map((a) => ({ id: a.id, name: a.name, kind: a.kind, owners: a.owners, liquid: a.liquid, archived: !!a.archived })),
         latestMonth: c.latestMonth,
         netWorth: c.netWorth,
         flows: { year: c.flows.year, household: c.flows.household, perMember: c.flows.perMember },
+        goals: st.goals.filter((g) => g.status !== 'archived').map((g) => ({ ...g, progress: goalProgress(st, c, g) })),
         thisMonth: c.statusOf(todayKey()),
       });
     },
@@ -289,6 +315,32 @@ export function createServer({ store }: ServerOptions): McpServer {
         return `- **${H.name}**: ${fmtMetric(h.id, h.value, L)} → ${T.hs[h.status]}. ${H.why}`;
       });
       return ok(`## ${T.health.title}\n${lines.join('\n')}`, { metrics: c.health, refYear: c.refYear });
+    },
+  );
+
+  server.registerTool(
+    'conti_onboarding',
+    {
+      title: 'Guided setup',
+      description:
+        'Return the next onboarding step for the household, derived from the data (there is no saved progress, so the user can stop and resume anywhere). Steps: 1 who is in the household, 2 the main goal, 3 the accounts, 4 the monthly income, 5 the first dashboard, 6 goal details (optional), 7 a monthly reminder (optional). For the goal step the available options are returned, already localized. Call it first for a new household and again after each step.',
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      const { st, L } = load();
+      const T = t(L);
+      const o = onboardingNext(st);
+      const options = o.next?.id === 'goal' ? o.nextOptions.map((k) => ({ key: k, label: T.goals.kinds[k as keyof typeof T.goals.kinds] })) : [];
+      const done = o.steps.filter((s) => s.done).length;
+      const lines = [`Setup ${done}/${o.steps.length} ${L === 'it' ? 'completato' : 'complete'}.`];
+      if (o.next) {
+        lines.push(`${L === 'it' ? 'Prossimo passo' : 'Next'} — ${o.next.n}. ${T.onboardingSteps[o.next.id]}${o.next.optional ? ` (${L === 'it' ? 'facoltativo' : 'optional'})` : ''}.`);
+        if (options.length) lines.push(`${T.goals.title}: ${options.map((x) => `${x.label} (${x.key})`).join(', ')}`);
+      } else {
+        lines.push(L === 'it' ? 'Configurazione completa.' : 'Setup complete.');
+      }
+      return ok(lines.join('\n'), { ...o, options });
     },
   );
 
@@ -572,21 +624,128 @@ export function createServer({ store }: ServerOptions): McpServer {
         maxPaymentRatio: z.number().min(0.05).max(0.6).optional(),
         targetSavingsRate: z.number().min(0).max(0.9).optional(),
         referenceYear: z.number().int().nullable().optional(),
+        relevanceThreshold: z.number().min(0).max(1).optional().describe('A purchase is "relevant" above this share of monthly net income (default 0.2)'),
+        modules: z
+          .object({
+            invest: moduleModeEnum.optional(),
+            home: moduleModeEnum.optional(),
+            debt: moduleModeEnum.optional(),
+            fixed: moduleModeEnum.optional(),
+          })
+          .optional()
+          .describe('Force optional modules on/off, or "auto" to let goals and data decide'),
+        reminder: z
+          .object({
+            day: z.number().int().min(1).max(31).optional().describe('Day of the month for the monthly-update reminder'),
+            channel: z.enum(['calendar', 'task', 'passive']).optional(),
+            extras: z
+              .object({ yearReview: z.boolean().optional(), annualExpense: z.boolean().optional(), goalMilestones: z.boolean().optional() })
+              .optional(),
+          })
+          .optional(),
         locale: z.enum(['en', 'it']).optional(),
         currency: z.string().length(3).optional(),
         householdName: z.string().optional(),
       }),
       annotations: { idempotentHint: true },
     },
-    async ({ locale, currency, householdName, ...patch }) => {
+    async ({ locale, currency, householdName, modules, reminder, ...patch }) => {
       const st = store.load();
       if (locale || currency || householdName) {
         const h = st.household ?? { name: 'Household', currency: 'EUR', locale: 'en' as Locale, createdAt: new Date().toISOString() };
         store.setHousehold({ ...h, locale: locale ?? h.locale, currency: currency?.toUpperCase() ?? h.currency, name: householdName ?? h.name });
       }
-      const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+      const clean: Partial<State['settings']> = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+      if (modules) {
+        const m = Object.fromEntries(Object.entries(modules).filter(([, v]) => v !== undefined));
+        clean.modules = { ...st.settings.modules, ...m };
+      }
+      if (reminder) {
+        const { extras, ...rest } = reminder;
+        clean.reminder = {
+          ...st.settings.reminder,
+          ...Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined)),
+          ...(extras ? { extras: { ...st.settings.reminder?.extras, ...extras } } : {}),
+        };
+      }
       const s = Object.keys(clean).length ? store.updateSettings(clean) : store.load().settings;
       return ok(`Settings saved: ${JSON.stringify(s)}`, { settings: s });
+    },
+  );
+
+  // ---------------------------------------------------------- goals
+  server.registerTool(
+    'conti_set_goal',
+    {
+      title: 'Set a goal',
+      description:
+        'Create or update a household goal: spending (understand where the money goes), emergency (build an emergency fund), home (buy a home), invest, debt (pay off a debt) or purchase (a significant purchase). The primary goal drives the dashboard header and tone — the first goal is primary by default. Optionally set a target amount and/or date, and link the accounts that count towards it (empty = liquidity beyond the emergency fund). Use status to mark a goal reached or archived.',
+      inputSchema: z.object({
+        id: z.string().optional().describe('Existing goal id to update; omit to create'),
+        kind: goalKindEnum.describe('spending | emergency | home | invest | debt | purchase'),
+        primary: z.boolean().optional().describe('Make this the main goal (the others become secondary)'),
+        name: z.string().optional().describe('Custom label, e.g. "New kitchen"'),
+        targetAmount: z.number().positive().optional(),
+        targetDate: z.string().optional().describe('YYYY-MM or YYYY-MM-DD'),
+        accounts: z.array(z.string()).default([]).describe('Accounts (id or name) that count towards the goal; empty = shared liquidity beyond the emergency fund'),
+        status: z.enum(['active', 'reached', 'archived']).optional(),
+      }),
+      annotations: { idempotentHint: true },
+    },
+    async (g) => {
+      const st = store.load();
+      const accountIds: string[] = [];
+      for (const ref of g.accounts) {
+        const a = findAccount(st, ref);
+        if (!a) return fail(`Unknown account "${ref}". Accounts: ${st.accounts.map((x) => x.name).join(', ') || 'none'}.`);
+        accountIds.push(a.id);
+      }
+      const ex = g.id ? st.goals.find((x) => x.id === g.id) : undefined;
+      if (g.id && !ex) return fail(`No goal with id "${g.id}".`);
+      const makePrimary = g.primary ?? ex?.primary ?? st.goals.filter((x) => x.status !== 'archived').length === 0;
+      const goal: Goal = {
+        id: ex?.id ?? newId('goal'),
+        kind: g.kind,
+        primary: makePrimary,
+        name: g.name ?? ex?.name,
+        targetAmount: g.targetAmount ?? ex?.targetAmount,
+        targetDate: g.targetDate ?? ex?.targetDate,
+        accountIds: g.accounts.length ? accountIds : ex?.accountIds ?? [],
+        status: g.status ?? ex?.status ?? 'active',
+      };
+      if (makePrimary) for (const other of st.goals) if (other.id !== goal.id && other.primary) store.upsertGoal({ ...other, primary: false });
+      store.upsertGoal(goal);
+      const { st: s2, L, c } = load();
+      const gp = goalProgress(s2, c, goal);
+      const T = t(L).goals;
+      const cur = c.currency;
+      const lines = [`${L === 'it' ? 'Obiettivo salvato' : 'Goal saved'}: ${goalLabel(goal, L)}${goal.primary ? ` (${T.primary})` : ''}.`];
+      if (isNum(gp.target))
+        lines.push(`${T.progress}: ${money(gp.accumulated, cur, L)} / ${money(gp.target, cur, L)} (${pct(gp.pct, L)})${gp.etaDate ? ` · ${monthLabel(gp.etaDate, L)} ${T.eta}` : ''}.`);
+      else lines.push(`${T.progress}: ${money(gp.accumulated, cur, L)} (${T.noTarget}).`);
+      return ok(lines.join('\n'), { goal, progress: gp });
+    },
+  );
+
+  server.registerTool(
+    'conti_delete_goal',
+    {
+      title: 'Delete a goal',
+      description: 'Remove a goal. To keep it in history instead, call conti_set_goal with status "reached" or "archived".',
+      inputSchema: z.object({ goal: z.string().describe('Goal id, name or kind') }),
+      annotations: { destructiveHint: true },
+    },
+    async ({ goal }) => {
+      const st = store.load();
+      const r = goal.trim().toLowerCase();
+      const g =
+        st.goals.find((x) => x.id === goal) ??
+        st.goals.find((x) => (x.name ?? '').toLowerCase() === r) ??
+        st.goals.find((x) => x.kind === r);
+      if (!g) return fail(`No goal matches "${goal}".`);
+      store.deleteGoal(g.id);
+      const { L } = load();
+      return ok(`${L === 'it' ? 'Obiettivo eliminato' : 'Deleted goal'}: ${goalLabel(g, L)}.`);
     },
   );
 
@@ -678,6 +837,39 @@ export function createServer({ store }: ServerOptions): McpServer {
         ...r.reasons.map((x) => `- ${T.reasons[x]}`),
       ];
       return ok(lines.filter(Boolean).join('\n'), { tab: 'purchase', result: r as unknown as Record<string, unknown> });
+    },
+  );
+
+  registerAppTool(
+    server,
+    'conti_purchase_budget',
+    {
+      title: 'How much can I spend?',
+      description:
+        'The reverse of "can I afford it?": how much the household could spend on a purchase while keeping the emergency fund intact — in cash, and (when a rate and duration are given) using financing up to a sustainable monthly payment. Use it when the user asks "how much can we spend on …" rather than naming a price.',
+      inputSchema: z.object({
+        rate: z.number().min(0).max(0.5).optional().describe('Loan TAN/APR as a fraction, for the financed option'),
+        years: z.number().min(0).max(30).optional().describe('Loan duration for the financed option'),
+        monthlyRunningCost: z.number().min(0).optional().describe('Ongoing monthly cost the purchase would add (insurance, fuel…)'),
+      }),
+      annotations: { readOnlyHint: true },
+      _meta: { ui: { resourceUri: UI_URI } },
+    },
+    async (p) => {
+      const { st, L, c } = load();
+      const r = purchaseBudget(st, c, p);
+      const T = t(L).purchaseBudget;
+      const cur = c.currency;
+      const lines = [
+        `## ${T.title}`,
+        `${T.maxCash}: ${money(r.maxCash, cur, L)}${isNum(r.emergencyReserve) ? ` (${money(r.emergencyReserve, cur, L)} ${T.emergencyReserve})` : ''}.`,
+      ];
+      if (isNum(r.maxFinanced) && isNum(r.maxLoanAmount) && isNum(r.monthlyPaymentCeiling))
+        lines.push(
+          `${T.maxFinanced}: ${money(r.maxFinanced, cur, L)} = ${money(r.downUsed, cur, L)} + ${money(r.maxLoanAmount, cur, L)} (${money(r.monthlyPaymentCeiling - r.monthlyRunningCost, cur, L)}/month).`,
+        );
+      for (const reason of r.reasons) lines.push(`⚠ ${T.reasons[reason]}`);
+      return ok(lines.join('\n'), { tab: 'purchase', result: r as unknown as Record<string, unknown> });
     },
   );
 

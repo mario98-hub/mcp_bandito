@@ -1,6 +1,21 @@
 /** Serializable view model sent to the dashboard UI. */
-import { compute, monthRange, nextKey, simulateHome, type Computed, type HomeResult, type MonthStatus } from '../core/engine.js';
-import type { MonthKey, State } from '../core/types.js';
+import {
+  compute,
+  goalProgress,
+  monthRange,
+  nextKey,
+  onboardingNext,
+  purchaseBudget,
+  resolveModules,
+  simulateHome,
+  type Computed,
+  type GoalProgress,
+  type HomeResult,
+  type MonthStatus,
+  type OnboardingNext,
+  type PurchaseBudget,
+} from '../core/engine.js';
+import type { Goal, ModuleKey, MonthKey, State } from '../core/types.js';
 
 export interface View {
   today: MonthKey;
@@ -8,6 +23,10 @@ export interface View {
   computed: Omit<Computed, 'statusOf'>;
   statuses: Record<MonthKey, MonthStatus>;
   home: HomeResult[];
+  onboarding: OnboardingNext;
+  modules: Record<ModuleKey, boolean>;
+  goals: { goal: Goal; progress: GoalProgress }[];
+  purchaseBudget: PurchaseBudget;
 }
 
 export function buildView(state: State, today: MonthKey): View {
@@ -24,5 +43,9 @@ export function buildView(state: State, today: MonthKey): View {
     computed: rest,
     statuses,
     home: state.scenarios.map((s) => simulateHome(state, c, s)),
+    onboarding: onboardingNext(state),
+    modules: resolveModules(state),
+    goals: state.goals.filter((g) => g.status !== 'archived').map((goal) => ({ goal, progress: goalProgress(state, c, goal) })),
+    purchaseBudget: purchaseBudget(state, c, {}),
   };
 }

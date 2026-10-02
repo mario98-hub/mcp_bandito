@@ -1,6 +1,6 @@
 {
   "name": "conti-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Open-source household finance MCP App: net worth, monthly savings, budget and home-purchase scenarios, rendered inline in Claude and any MCP Apps host. Your data stays yours.",
   "type": "module",
   "license": "MIT",

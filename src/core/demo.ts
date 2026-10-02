@@ -64,6 +64,10 @@ export function demoState(endMonth = '2026-09', months = 21): State {
       { id: 'etf-plan', name: 'ETF plan', amount: 300, frequency: 'monthly', ownerId: 'alex', kind: 'saving' },
     ],
     settings: { ...DEFAULT_SETTINGS },
+    goals: [
+      { id: 'home-goal', kind: 'home', primary: true, name: 'Two-bedroom flat', targetAmount: 80000, accountIds: [], status: 'active' },
+      { id: 'ef-goal', kind: 'emergency', primary: false, accountIds: ['sam-bank'], status: 'active' },
+    ],
     scenarios: [
       {
         id: 'flat',
@@ -79,6 +83,5 @@ export function demoState(endMonth = '2026-09', months = 21): State {
         durations: [20, 25, 30],
       },
     ],
-    goals: [],
   };
 }
