@@ -17,6 +17,15 @@ async function stdioClient(db) {
   return client;
 }
 
+async function withClient(db, fn) {
+  const c = await stdioClient(db);
+  try {
+    return await fn(c);
+  } finally {
+    await c.close();
+  }
+}
+
 test('stdio: full monthly workflow', async () => {
   const c = await stdioClient(join(dir, 'a.db'));
   try {
@@ -223,6 +232,112 @@ test('stdio: goal edge cases, primary switching and backup round-trip', async ()
   } finally {
     await c.close();
   }
+});
+
+test('stdio: three-person household with shared accounts, debt and goals', async () => {
+  const c = await stdioClient(join(dir, 'multi.db'));
+  try {
+    let r = await c.callTool({
+      name: 'conti_setup',
+      arguments: {
+        name: 'Famiglia Tre',
+        locale: 'it',
+        members: [{ name: 'Anna' }, { name: 'Bruno' }, { name: 'Carla' }],
+        accounts: [
+          { name: 'Conto Anna', kind: 'cash', owners: [{ member: 'Anna', share: 1 }] },
+          { name: 'Broker Bruno', kind: 'investment', owners: [{ member: 'Bruno', share: 1 }] },
+          { name: 'Conto Carla', kind: 'cash', owners: [{ member: 'Carla', share: 1 }] },
+          { name: 'Conto comune', kind: 'cash', owners: [] },
+          { name: 'Mutuo', kind: 'debt', owners: [{ member: 'Anna', share: 0.5 }, { member: 'Bruno', share: 0.5 }] },
+        ],
+      },
+    });
+    assert.ok(!r.isError, text(r));
+    const ids = r.structuredContent.members.map((m) => m.id);
+    assert.equal(ids.length, 3);
+
+    // a shared primary goal and one linked to a personal account
+    await c.callTool({ name: 'conti_set_goal', arguments: { kind: 'home', primary: true, targetAmount: 100000 } });
+    await c.callTool({ name: 'conti_set_goal', arguments: { kind: 'emergency', accounts: ['Conto Carla'], targetAmount: 12000 } });
+
+    for (const [month, mult] of [['2026-01', 1], ['2026-02', 2]]) {
+      r = await c.callTool({
+        name: 'conti_record_month',
+        arguments: {
+          month,
+          balances: [
+            { account: 'Conto Anna', balance: 10000 + 500 * mult },
+            { account: 'Broker Bruno', balance: 20000 + 800 * mult, unrealizedGain: 1000 },
+            { account: 'Conto Carla', balance: 8000 + 400 * mult },
+            { account: 'Conto comune', balance: 6000 + 300 * mult, allocations: [{ member: 'Anna', amount: 1000 }, { member: 'Bruno', amount: 1000 }] },
+            { account: 'Mutuo', balance: 150000 - 1000 * mult },
+          ],
+          incomes: [{ member: 'Anna', net: 2200 }, { member: 'Bruno', net: 2600 }, { member: 'Carla', net: 1900 }],
+        },
+      });
+      assert.ok(!r.isError, text(r));
+    }
+
+    // overview: three owners + shared, negative debt, both goals, per-member flows
+    r = await c.callTool({ name: 'conti_get_overview', arguments: {} });
+    const ov = r.structuredContent;
+    assert.equal(ov.members.length, 3);
+    assert.ok(ov.netWorth.debts < 0, 'debt should be negative');
+    assert.ok(ov.netWorth.byOwner._shared, 'joint remainder is shared');
+    for (const id of ids) assert.ok(ov.flows.perMember[id], `flows for ${id}`);
+    assert.equal(ov.goals.length, 2);
+    assert.equal(ov.goals.filter((g) => g.primary).length, 1);
+
+    // history has every owner column and both months
+    r = await c.callTool({ name: 'conti_get_history', arguments: {} });
+    assert.match(text(r), /Anna/);
+    assert.match(text(r), /2026-01/);
+    assert.match(text(r), /2026-02/);
+
+    // home scenario with a different capital share per member
+    r = await c.callTool({
+      name: 'conti_home_scenario',
+      arguments: { name: 'Casa', price: 300000, rate: 0.03, closingCosts: 10000, capitalUse: [{ member: 'Anna', share: 0.6 }, { member: 'Bruno', share: 0.5 }, { member: 'Carla', share: 0.7 }], save: true },
+    });
+    assert.ok(!r.isError, text(r));
+    assert.equal(r.structuredContent.result.perOwner.filter((o) => o.liquid > 0).length >= 3, true);
+
+    // household purchase budget
+    r = await c.callTool({ name: 'conti_purchase_budget', arguments: { rate: 0.06, years: 6 } });
+    assert.ok(!r.isError, text(r));
+    assert.ok(r.structuredContent.result.maxFinanced > r.structuredContent.result.maxCash);
+  } finally {
+    await c.close();
+  }
+});
+
+test('stdio: concurrent clients write one database safely', async () => {
+  const db = join(dir, 'concurrent.db');
+  await withClient(db, (c) =>
+    c.callTool({
+      name: 'conti_setup',
+      arguments: { name: 'Shared', locale: 'en', members: [{ name: 'Uno' }], accounts: [{ name: 'Acc', kind: 'cash', owners: [{ member: 'Uno', share: 1 }] }] },
+    }),
+  );
+
+  // four independent client processes record different months at the same time
+  const months = ['2026-01', '2026-02', '2026-03', '2026-04'];
+  const results = await Promise.all(
+    months.map((m, i) =>
+      withClient(db, (c) =>
+        c.callTool({ name: 'conti_record_month', arguments: { month: m, balances: [{ account: 'Acc', balance: 1000 + i * 100 }], incomes: [{ member: 'Uno', net: 2000 }] } }),
+      ),
+    ),
+  );
+  for (const r of results) assert.ok(!r.isError, text(r));
+
+  // every write landed, no lost update
+  await withClient(db, async (c) => {
+    const hist = await c.callTool({ name: 'conti_get_history', arguments: {} });
+    for (const m of months) assert.match(text(hist), new RegExp(m));
+    const ov = await c.callTool({ name: 'conti_get_overview', arguments: {} });
+    assert.equal(ov.structuredContent.latestMonth, '2026-04');
+  });
 });
 
 test('http: token required, works with bearer and secret path', async () => {
