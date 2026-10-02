@@ -13,6 +13,7 @@ import {
   emptyState,
   type Account,
   type BudgetItem,
+  type Goal,
   type HomeScenario,
   type Household,
   type Income,
@@ -22,8 +23,8 @@ import {
   type State,
 } from '../core/types.js';
 
-type Collection = 'members' | 'accounts' | 'snapshots' | 'incomes' | 'budget' | 'scenarios';
-const COLLECTIONS: Collection[] = ['members', 'accounts', 'snapshots', 'incomes', 'budget', 'scenarios'];
+type Collection = 'members' | 'accounts' | 'snapshots' | 'incomes' | 'budget' | 'scenarios' | 'goals';
+const COLLECTIONS: Collection[] = ['members', 'accounts', 'snapshots', 'incomes', 'budget', 'scenarios', 'goals'];
 
 export const newId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 10)}`;
 export const slug = (s: string) =>
@@ -89,7 +90,7 @@ export class Store {
     s.snapshots.sort((a, b) => a.month.localeCompare(b.month) || a.accountId.localeCompare(b.accountId));
     s.incomes.sort((a, b) => a.month.localeCompare(b.month) || a.memberId.localeCompare(b.memberId));
     const order = (this.meta<Record<string, string[]>>('order') ?? {}) as Record<string, string[]>;
-    for (const c of ['members', 'accounts', 'budget', 'scenarios'] as const) {
+    for (const c of ['members', 'accounts', 'budget', 'scenarios', 'goals'] as const) {
       const o = order[c];
       if (o) (s[c] as { id: string }[]).sort((a, b) => idx(o, a.id) - idx(o, b.id));
     }
@@ -113,7 +114,7 @@ export class Store {
     this.db
       .prepare('INSERT INTO docs(collection, id, data, updated_at) VALUES(?, ?, ?, ?) ON CONFLICT(collection, id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at')
       .run(c, id, JSON.stringify(data), new Date().toISOString());
-    if (c === 'members' || c === 'accounts' || c === 'budget' || c === 'scenarios') {
+    if (c === 'members' || c === 'accounts' || c === 'budget' || c === 'scenarios' || c === 'goals') {
       const order = this.meta<Record<string, string[]>>('order') ?? {};
       const o = (order[c] ??= []);
       if (!o.includes(id)) {
@@ -214,6 +215,13 @@ export class Store {
     return this.tx('scenario.delete', { id }, () => this.del('scenarios', id));
   }
 
+  upsertGoal(g: Goal) {
+    this.tx('goal', g, () => this.put('goals', g.id, g));
+  }
+  deleteGoal(id: string) {
+    return this.tx('goal.delete', { id }, () => this.del('goals', id));
+  }
+
   /** Replace everything with the given state (used by import). */
   replaceAll(s: State) {
     this.tx('import', { members: s.members.length, accounts: s.accounts.length, snapshots: s.snapshots.length }, () => {
@@ -222,7 +230,7 @@ export class Store {
       if (s.household) this.setMeta('household', s.household);
       this.setMeta('settings', { ...DEFAULT_SETTINGS, ...s.settings });
       for (const c of COLLECTIONS) {
-        for (const d of s[c] as unknown as Record<string, string>[]) {
+        for (const d of (s[c] ?? []) as unknown as Record<string, string>[]) {
           const id =
             c === 'snapshots' ? `${d.accountId}|${d.month}` : c === 'incomes' ? `${d.memberId}|${d.month}` : d.id!;
           this.put(c, id, d);

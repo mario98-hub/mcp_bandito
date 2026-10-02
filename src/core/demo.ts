@@ -79,5 +79,6 @@ export function demoState(endMonth = '2026-09', months = 21): State {
         durations: [20, 25, 30],
       },
     ],
+    goals: [],
   };
 }

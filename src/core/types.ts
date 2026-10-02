@@ -24,6 +24,8 @@ export interface Member {
   id: string;
   name: string;
   color?: string;
+  /** Day of the month the salary usually lands (1-31); drives the reminder-day rule. */
+  payday?: number;
 }
 
 export type AccountKind =
@@ -102,6 +104,50 @@ export interface BudgetItem {
   note?: string;
 }
 
+/** The six onboarding objectives. The primary one drives header, modules and tone. */
+export type GoalKind =
+  | 'spending' // understand where the money goes
+  | 'emergency' // build an emergency fund
+  | 'home' // buy a home
+  | 'invest' // invest
+  | 'debt' // pay off a debt
+  | 'purchase'; // a significant purchase
+
+export type GoalStatus = 'active' | 'reached' | 'archived';
+
+export interface Goal {
+  id: string;
+  kind: GoalKind;
+  /** Exactly one goal is primary; it decides the header figure and step-6 questions. */
+  primary: boolean;
+  name?: string;
+  /** Target amount, if the user set one. */
+  targetAmount?: number;
+  /** Target date (`YYYY-MM-DD` or `YYYY-MM`); optional — without it the engine estimates at the current pace. */
+  targetDate?: string;
+  /** Accounts that count towards this goal; empty = liquidity beyond the emergency fund. */
+  accountIds: string[];
+  status: GoalStatus;
+}
+
+/** Optional modules that switch themselves on from the objective or the data. */
+export type ModuleKey = 'invest' | 'home' | 'debt' | 'fixed';
+/** `auto` = decided by goals + data; `on`/`off` = forced by the user. */
+export type ModuleMode = 'auto' | 'on' | 'off';
+
+export interface ReminderSettings {
+  /** Day of the month for the monthly-update reminder (1-31). */
+  day?: number;
+  /** Delivery channel: 'calendar', 'task' (Claude scheduled task) or 'passive'. */
+  channel?: string;
+  /** Extra, individually disable-able reminders. */
+  extras?: {
+    yearReview?: boolean;
+    annualExpense?: boolean;
+    goalMilestones?: boolean;
+  };
+}
+
 export interface Settings {
   /** Tax rate on capital gains (Italy: 26%). */
   capitalGainsTax: number;
@@ -113,6 +159,15 @@ export interface Settings {
   targetSavingsRate: number;
   /** Year used for averages; null = latest year with income data. */
   referenceYear: number | null;
+  /** Per-module activation (auto from goals+data, or forced on/off). */
+  modules: Record<ModuleKey, ModuleMode>;
+  /**
+   * A purchase is "relevant" (Conti should weigh in from a free chat) above this
+   * share of monthly net income — or whenever it is on instalments. Default 0.20.
+   */
+  relevanceThreshold: number;
+  /** Monthly-update reminder preferences (filled at onboarding step 7). */
+  reminder?: ReminderSettings;
 }
 
 export interface HomeScenario {
@@ -149,6 +204,7 @@ export interface State {
   budget: BudgetItem[];
   settings: Settings;
   scenarios: HomeScenario[];
+  goals: Goal[];
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -157,6 +213,8 @@ export const DEFAULT_SETTINGS: Settings = {
   maxPaymentRatio: 0.33,
   targetSavingsRate: 0.2,
   referenceYear: null,
+  modules: { invest: 'auto', home: 'auto', debt: 'auto', fixed: 'auto' },
+  relevanceThreshold: 0.2,
 };
 
 export function emptyState(): State {
@@ -171,6 +229,7 @@ export function emptyState(): State {
     budget: [],
     settings: { ...DEFAULT_SETTINGS },
     scenarios: [],
+    goals: [],
   };
 }
 

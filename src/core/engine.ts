@@ -15,9 +15,12 @@
 import {
   SHARED,
   type Account,
+  type Goal,
+  type GoalKind,
   type HomeScenario,
   type Income,
   type Member,
+  type ModuleKey,
   type MonthKey,
   type Settings,
   type Snapshot,
@@ -848,6 +851,205 @@ export function simulatePurchase(state: State, c: Computed, p: PurchaseInput): P
     savingsAfter,
     opportunityCost: down * (Math.pow(1 + expRet, horizon) - 1),
     verdict,
+    reasons,
+  };
+}
+
+// ---------------------------------------------------------------- v0.2: onboarding, modules, goals, budget
+
+/** Realizable value of an account at (or before) a month, summed across owners. */
+function accountRealizableAt(state: State, accountId: string, tax: number, upto?: MonthKey): number {
+  const acc = state.accounts.find((a) => a.id === accountId);
+  if (!acc) return 0;
+  const snaps = state.snapshots
+    .filter((s) => s.accountId === accountId && isNum(s.balance) && (!upto || s.month <= upto))
+    .sort((a, b) => a.month.localeCompare(b.month));
+  const s = snaps[snaps.length - 1];
+  if (!s) return 0;
+  return sum(Object.values(attribute(acc, s, tax)).map((a) => a.realizable));
+}
+
+export type OnboardingStepId = 'who' | 'goal' | 'accounts' | 'income' | 'dashboard' | 'goalDetails' | 'reminder';
+export interface OnboardingStep {
+  id: OnboardingStepId;
+  /** 1-based step number as shown to the user. */
+  n: number;
+  done: boolean;
+  optional: boolean;
+}
+export interface OnboardingNext {
+  /** All seven steps with their done flags (for the dashboard's initial screen). */
+  steps: OnboardingStep[];
+  /** First incomplete step (mandatory first, then optional), or null when nothing is left. */
+  next: OnboardingStep | null;
+  /** Stable option keys for `next` (e.g. the goal kinds for step 2); server localizes them. */
+  nextOptions: string[];
+  /** Mandatory steps 1-5 satisfied: the first dashboard can be shown. */
+  complete: boolean;
+  /** Chat-activation criterion: at least one person, one account with a balance, one income. */
+  onboarded: boolean;
+}
+
+/**
+ * Derive the onboarding state purely from the data — there is no "completed"
+ * flag, so a user can stop and resume from any device.
+ */
+export function onboardingNext(state: State): OnboardingNext {
+  const whoDone = !!state.household && state.members.length > 0;
+  const activeGoals = state.goals.filter((g) => g.status !== 'archived');
+  const primary = activeGoals.find((g) => g.primary) ?? activeGoals[0] ?? null;
+  const withBalance = new Set(state.snapshots.filter((s) => isNum(s.balance)).map((s) => s.accountId));
+  const accountsDone = state.accounts.some((a) => !a.archived && withBalance.has(a.id));
+  const incomeDone = state.incomes.length > 0;
+  const goalDone = activeGoals.length > 0;
+  const coreDone = whoDone && goalDone && accountsDone && incomeDone;
+  const needsAmount = primary ? !['spending', 'emergency'].includes(primary.kind) : false;
+  const goalDetailsDone = !primary ? true : needsAmount ? isNum(primary.targetAmount) : true;
+  const reminderDone = isNum(state.settings.reminder?.day);
+
+  const steps: OnboardingStep[] = [
+    { id: 'who', n: 1, done: whoDone, optional: false },
+    { id: 'goal', n: 2, done: goalDone, optional: false },
+    { id: 'accounts', n: 3, done: accountsDone, optional: false },
+    { id: 'income', n: 4, done: incomeDone, optional: false },
+    { id: 'dashboard', n: 5, done: coreDone, optional: false },
+    { id: 'goalDetails', n: 6, done: goalDetailsDone, optional: true },
+    { id: 'reminder', n: 7, done: reminderDone, optional: true },
+  ];
+  const next = steps.find((s) => !s.done) ?? null;
+  const nextOptions =
+    next?.id === 'goal' ? (['spending', 'emergency', 'home', 'invest', 'debt', 'purchase'] satisfies GoalKind[]) : [];
+  return { steps, next, nextOptions, complete: coreDone, onboarded: whoDone && accountsDone && incomeDone };
+}
+
+/**
+ * Which optional modules are effectively active. `on`/`off` are forced by the
+ * user; `auto` turns on from a linked goal or from the data itself. A module
+ * switched off by hand stays off.
+ */
+export function resolveModules(state: State): Record<ModuleKey, boolean> {
+  const modes = state.settings.modules ?? { invest: 'auto', home: 'auto', debt: 'auto', fixed: 'auto' };
+  const goals = state.goals.filter((g) => g.status !== 'archived');
+  const hasGoal = (k: GoalKind) => goals.some((g) => g.kind === k);
+  const accts = state.accounts.filter((a) => !a.archived);
+  const auto: Record<ModuleKey, boolean> = {
+    invest: accts.some((a) => a.kind === 'investment' || a.kind === 'pension') || hasGoal('invest'),
+    home: state.scenarios.length > 0 || hasGoal('home'),
+    debt: accts.some((a) => a.kind === 'debt') || hasGoal('debt'),
+    fixed: state.budget.length > 0 || hasGoal('spending'),
+  };
+  const resolve = (k: ModuleKey) => {
+    const m = modes[k] ?? 'auto';
+    return m === 'on' ? true : m === 'off' ? false : auto[k];
+  };
+  return { invest: resolve('invest'), home: resolve('home'), debt: resolve('debt'), fixed: resolve('fixed') };
+}
+
+export interface GoalProgress {
+  goalId: string;
+  /** Amount accumulated towards the goal. */
+  accumulated: number;
+  target: number | null;
+  pct: number | null;
+  /** Monthly savings pace used for the estimate. */
+  monthly: number | null;
+  /** Estimated completion month at the current pace, `YYYY-MM`. */
+  etaDate: MonthKey | null;
+}
+
+/** Liquidity available for goals: liquid wealth beyond the emergency fund. */
+function liquidityPool(state: State, c: Computed): number {
+  const spend = c.flows.household?.avgSpending ?? null;
+  const reserve = isNum(spend) ? state.settings.emergencyMonths * spend : 0;
+  return Math.max(0, c.netWorth.liquid - reserve);
+}
+
+/**
+ * Progress of a goal. Linked accounts count directly; otherwise the goal draws
+ * from the shared liquidity pool, with the primary goal served first.
+ */
+export function goalProgress(state: State, c: Computed, goal: Goal): GoalProgress {
+  const tax = state.settings.capitalGainsTax;
+  const target = isNum(goal.targetAmount) ? goal.targetAmount : null;
+  let accumulated = 0;
+  if (goal.accountIds.length) {
+    accumulated = sum(goal.accountIds.map((id) => accountRealizableAt(state, id, tax, c.latestMonth ?? undefined)));
+  } else {
+    const unlinked = state.goals
+      .filter((g) => g.status === 'active' && g.accountIds.length === 0)
+      .sort((a, b) => (a.primary === b.primary ? 0 : a.primary ? -1 : 1));
+    let remaining = liquidityPool(state, c);
+    for (const g of unlinked) {
+      const slice = isNum(g.targetAmount) ? Math.min(g.targetAmount, remaining) : remaining;
+      if (g.id === goal.id) {
+        accumulated = Math.max(0, slice);
+        break;
+      }
+      remaining = Math.max(0, remaining - slice);
+    }
+  }
+  const pct = isNum(target) && target > 0 ? Math.max(0, Math.min(1, accumulated / target)) : null;
+  const monthly = c.flows.household?.avgSavings ?? null;
+  let etaDate: MonthKey | null = null;
+  if (isNum(target) && isNum(monthly) && monthly > 0 && accumulated < target && c.latestMonth) {
+    const months = Math.ceil((target - accumulated) / monthly);
+    let k = c.latestMonth;
+    for (let i = 0; i < months; i++) k = nextKey(k);
+    etaDate = k;
+  }
+  return { goalId: goal.id, accumulated, target, pct, monthly, etaDate };
+}
+
+export interface PurchaseBudgetInput {
+  /** Annual loan rate (TAN) for the financed option. */
+  rate?: number;
+  /** Loan duration in years for the financed option. */
+  years?: number;
+  /** Ongoing monthly cost the purchase brings (server may pass an editable default). */
+  monthlyRunningCost?: number;
+}
+export interface PurchaseBudget {
+  /** Most you can pay in cash while keeping the emergency fund intact. */
+  maxCash: number;
+  /** Most you can spend using financing (cash down + the biggest affordable loan); null without rate/years. */
+  maxFinanced: number | null;
+  /** Cash used as down payment in the financed option. */
+  downUsed: number;
+  maxLoanAmount: number | null;
+  /** Max sustainable monthly payment = income × maxPaymentRatio. */
+  monthlyPaymentCeiling: number | null;
+  monthlyRunningCost: number;
+  /** Cash reserved for the emergency fund. */
+  emergencyReserve: number | null;
+  reasons: ('noSpendingData' | 'noIncome')[];
+}
+
+/** The reverse question: "how much can I spend?", in cash and with financing. */
+export function purchaseBudget(state: State, c: Computed, input: PurchaseBudgetInput = {}): PurchaseBudget {
+  const S = state.settings;
+  const spend = c.flows.household?.avgSpending ?? null;
+  const income = c.flows.household?.avgIncome ?? null;
+  const cash = c.netWorth.cash;
+  const running = N(input.monthlyRunningCost);
+  const reasons: PurchaseBudget['reasons'] = [];
+  if (!isNum(spend)) reasons.push('noSpendingData');
+  if (!isNum(income)) reasons.push('noIncome');
+  const emergencyReserve = isNum(spend) ? S.emergencyMonths * spend : null;
+  const maxCash = Math.max(0, cash - (emergencyReserve ?? 0));
+  const paymentCeiling = isNum(income) ? income * S.maxPaymentRatio : null;
+  const availablePayment = isNum(paymentCeiling) ? Math.max(0, paymentCeiling - running) : null;
+  const years = isNum(input.years) && input.years > 0 ? input.years : 0;
+  const rate = N(input.rate);
+  const maxLoanAmount = isNum(availablePayment) && years > 0 ? maxLoan(availablePayment, rate, years) : null;
+  const maxFinanced = years > 0 && isNum(maxLoanAmount) ? maxCash + maxLoanAmount : null;
+  return {
+    maxCash,
+    maxFinanced,
+    downUsed: maxCash,
+    maxLoanAmount,
+    monthlyPaymentCeiling: paymentCeiling,
+    monthlyRunningCost: running,
+    emergencyReserve,
     reasons,
   };
 }
