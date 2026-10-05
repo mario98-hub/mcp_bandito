@@ -184,8 +184,8 @@ export interface ServerOptions {
 
 export function createServer({ store }: ServerOptions): McpServer {
   const server = new McpServer({ name: 'conti', title: 'Conti', version: VERSION }, { instructions: INSTRUCTIONS });
-  const load = () => {
-    const st = store.load();
+  const load = async () => {
+    const st = await store.load();
     const L: Locale = st.household?.locale ?? 'en';
     return { st, L, c: compute(st, { today: todayKey() }) };
   };
@@ -220,7 +220,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       _meta: { ui: { resourceUri: UI_URI } },
     },
     async ({ tab, month }) => {
-      const { st, L, c } = load();
+      const { st, L, c } = await load();
       return ok(overviewText(st, c, L), { tab: tab ?? 'overview', month: month ?? null, revision: st.revision });
     },
   );
@@ -237,7 +237,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       _meta: { ui: { resourceUri: UI_URI, visibility: ['app'] } },
     },
     async () => {
-      const { st } = load();
+      const { st } = await load();
       return ok('ok', { view: buildView(st, todayKey()) as unknown as Record<string, unknown> });
     },
   );
@@ -252,7 +252,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       annotations: { readOnlyHint: true },
     },
     async () => {
-      const { st, L, c } = load();
+      const { st, L, c } = await load();
       return ok(overviewText(st, c, L), {
         setUp: !!st.household,
         onboarding: onboardingNext(st),
@@ -280,7 +280,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       annotations: { readOnlyHint: true },
     },
     async ({ from, to }) => {
-      const { st, L, c } = load();
+      const { st, L, c } = await load();
       const rows = c.rows.filter((r) => (!from || r.month >= from) && (!to || r.month <= to));
       const owners = c.owners.map((o) => o.id);
       const head = `| Month | Net worth | ${owners.map((o) => ownerName(st, o, L)).join(' | ')} | Income | Savings | Spending |`;
@@ -308,7 +308,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       annotations: { readOnlyHint: true },
     },
     async () => {
-      const { L, c } = load();
+      const { L, c } = await load();
       const T = t(L);
       const lines = c.health.map((h) => {
         const H = T.health[h.id];
@@ -328,7 +328,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       annotations: { readOnlyHint: true },
     },
     async () => {
-      const { st, L } = load();
+      const { st, L } = await load();
       const T = t(L);
       const o = onboardingNext(st);
       const options = o.next?.id === 'goal' ? o.nextOptions.map((k) => ({ key: k, label: T.goals.kinds[k as keyof typeof T.goals.kinds] })) : [];
@@ -360,9 +360,9 @@ export function createServer({ store }: ServerOptions): McpServer {
       annotations: { idempotentHint: true },
     },
     async (args) => {
-      let st = store.load();
+      let st = await store.load();
       const h = st.household ?? { name: 'Household', currency: 'EUR', locale: 'en' as Locale, createdAt: new Date().toISOString() };
-      store.setHousehold({
+      await store.setHousehold({
         ...h,
         name: args.name ?? h.name,
         currency: (args.currency ?? h.currency).toUpperCase(),
@@ -370,18 +370,18 @@ export function createServer({ store }: ServerOptions): McpServer {
       });
       const palette = ['#1f5fbf', '#e2553a', '#2c7a2f', '#8a4fbf', '#c78a00', '#0f8a8a'];
       for (const m of args.members) {
-        st = store.load();
+        st = await store.load();
         const ex = findMember(st, m.name);
-        if (ex) store.upsertMember({ ...ex, name: m.name, color: m.color ?? ex.color });
-        else store.upsertMember({ id: uniqueId(m.name, new Set(st.members.map((x) => x.id))), name: m.name, color: m.color ?? palette[st.members.length % palette.length] });
+        if (ex) await store.upsertMember({ ...ex, name: m.name, color: m.color ?? ex.color });
+        else await store.upsertMember({ id: uniqueId(m.name, new Set(st.members.map((x) => x.id))), name: m.name, color: m.color ?? palette[st.members.length % palette.length] });
       }
       const created: string[] = [];
       for (const a of args.accounts) {
-        const r = upsertAccount(a);
+        const r = await upsertAccount(a);
         if ('error' in r) return fail(r.error);
         created.push(`${r.account.name} (${r.account.id})`);
       }
-      const { st: s2, L, c } = load();
+      const { st: s2, L, c } = await load();
       return ok(
         `Saved. Members: ${s2.members.map((m) => `${m.name} (${m.id})`).join(', ') || 'none'}. Accounts: ${s2.accounts.map((a) => `${a.name} (${a.id}, ${a.kind}, ${a.owners.length ? a.owners.map((o) => `${ownerName(s2, o.memberId, L)} ${pct(o.share, L)}`).join('+') : t(L).shared})`).join(', ') || 'none'}.\n\n${overviewText(s2, c, L)}`,
         { members: s2.members, accounts: s2.accounts },
@@ -389,8 +389,8 @@ export function createServer({ store }: ServerOptions): McpServer {
     },
   );
 
-  function upsertAccount(a: z.infer<typeof accountInput>): { account: Account } | { error: string } {
-    const st = store.load();
+  async function upsertAccount(a: z.infer<typeof accountInput>): Promise<{ account: Account } | { error: string }> {
+    const st = await store.load();
     const owners = [];
     for (const o of a.owners) {
       const m = findMember(st, o.member);
@@ -412,7 +412,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       archived: a.archived ?? ex?.archived,
       note: a.note ?? ex?.note,
     };
-    store.upsertAccount(acc);
+    await store.upsertAccount(acc);
     return { account: acc };
   }
 
@@ -424,7 +424,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       inputSchema: accountInput,
     },
     async (a) => {
-      const r = upsertAccount(a);
+      const r = await upsertAccount(a);
       if ('error' in r) return fail(r.error);
       return ok(`Account saved: ${r.account.name} (id ${r.account.id}).`, { account: r.account });
     },
@@ -439,10 +439,10 @@ export function createServer({ store }: ServerOptions): McpServer {
       annotations: { destructiveHint: true },
     },
     async ({ account }) => {
-      const st = store.load();
+      const st = await store.load();
       const a = findAccount(st, account);
       if (!a) return fail(`No account matches "${account}".`);
-      store.deleteAccount(a.id);
+      await store.deleteAccount(a.id);
       return ok(`Deleted ${a.name} and its history.`);
     },
   );
@@ -456,10 +456,10 @@ export function createServer({ store }: ServerOptions): McpServer {
       annotations: { destructiveHint: true },
     },
     async ({ member }) => {
-      const st = store.load();
+      const st = await store.load();
       const m = findMember(st, member);
       if (!m) return fail(`No member matches "${member}".`);
-      store.removeMember(m.id);
+      await store.removeMember(m.id);
       return ok(`Removed ${m.name}.`);
     },
   );
@@ -498,7 +498,7 @@ export function createServer({ store }: ServerOptions): McpServer {
     },
     async ({ month, balances, incomes }) => {
       if (!isMonthKey(month)) return fail('month must be YYYY-MM');
-      const st = store.load();
+      const st = await store.load();
       if (!st.members.length) return fail('Household not set up: call conti_setup first.');
       const snaps = [];
       const errs: string[] = [];
@@ -530,8 +530,8 @@ export function createServer({ store }: ServerOptions): McpServer {
         return fail(
           `Nothing saved: ${errs.join('; ')}. Accounts: ${st.accounts.map((a) => `${a.name} (${a.id})`).join(', ')}. Members: ${st.members.map((m) => m.name).join(', ')}. Create missing accounts with conti_upsert_account.`,
         );
-      store.recordMonth(snaps, incs);
-      const { st: s2, L, c } = load();
+      await store.recordMonth(snaps, incs);
+      const { st: s2, L, c } = await load();
       const row = c.rows.find((r) => r.month === month);
       const s = c.statusOf(month);
       const miss = [...s.missingAccounts.map((id) => s2.accounts.find((a) => a.id === id)?.name ?? id), ...s.missingIncomes.map((id) => `${ownerName(s2, id, L)} income`)];
@@ -554,10 +554,10 @@ export function createServer({ store }: ServerOptions): McpServer {
       annotations: { destructiveHint: true },
     },
     async ({ month, accounts, members }) => {
-      const st = store.load();
+      const st = await store.load();
       const aIds = accounts.map((a) => findAccount(st, a)?.id).filter((x): x is string => !!x);
       const mIds = members.map((m) => findMember(st, m)?.id).filter((x): x is string => !!x);
-      const n = store.deleteEntries(month, aIds, mIds);
+      const n = await store.deleteEntries(month, aIds, mIds);
       return ok(`Deleted ${n} entr${n === 1 ? 'y' : 'ies'} for ${month}.`);
     },
   );
@@ -581,7 +581,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       }),
     },
     async (b) => {
-      const st = store.load();
+      const st = await store.load();
       let ownerId: string | null = null;
       if (b.owner) {
         const m = findMember(st, b.owner);
@@ -590,8 +590,8 @@ export function createServer({ store }: ServerOptions): McpServer {
       }
       const ex = b.id ? st.budget.find((x) => x.id === b.id) : st.budget.find((x) => x.name.toLowerCase() === b.name.toLowerCase() && (x.ownerId ?? null) === ownerId);
       const item = { id: ex?.id ?? newId('b'), name: b.name, amount: b.amount, frequency: b.frequency, dueMonth: b.dueMonth, ownerId, kind: b.kind, category: b.category, note: b.note };
-      store.upsertBudgetItem(item);
-      const { L, c } = load();
+      await store.upsertBudgetItem(item);
+      const { L, c } = await load();
       return ok(`Saved "${item.name}". Fixed commitments now ${money(c.budget.fixedMonthlyEquivalent, c.currency, L)}/month (yearly items spread over 12 months).`, { item });
     },
   );
@@ -605,10 +605,10 @@ export function createServer({ store }: ServerOptions): McpServer {
       annotations: { destructiveHint: true },
     },
     async ({ item }) => {
-      const st = store.load();
+      const st = await store.load();
       const b = st.budget.find((x) => x.id === item) ?? st.budget.find((x) => x.name.toLowerCase() === item.toLowerCase());
       if (!b) return fail(`No budget item matches "${item}".`);
-      store.deleteBudgetItem(b.id);
+      await store.deleteBudgetItem(b.id);
       return ok(`Deleted "${b.name}".`);
     },
   );
@@ -650,10 +650,10 @@ export function createServer({ store }: ServerOptions): McpServer {
       annotations: { idempotentHint: true },
     },
     async ({ locale, currency, householdName, modules, reminder, ...patch }) => {
-      const st = store.load();
+      const st = await store.load();
       if (locale || currency || householdName) {
         const h = st.household ?? { name: 'Household', currency: 'EUR', locale: 'en' as Locale, createdAt: new Date().toISOString() };
-        store.setHousehold({ ...h, locale: locale ?? h.locale, currency: currency?.toUpperCase() ?? h.currency, name: householdName ?? h.name });
+        await store.setHousehold({ ...h, locale: locale ?? h.locale, currency: currency?.toUpperCase() ?? h.currency, name: householdName ?? h.name });
       }
       const clean: Partial<State['settings']> = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
       if (modules) {
@@ -668,7 +668,7 @@ export function createServer({ store }: ServerOptions): McpServer {
           ...(extras ? { extras: { ...st.settings.reminder?.extras, ...extras } } : {}),
         };
       }
-      const s = Object.keys(clean).length ? store.updateSettings(clean) : store.load().settings;
+      const s = Object.keys(clean).length ? await store.updateSettings(clean) : (await store.load()).settings;
       return ok(`Settings saved: ${JSON.stringify(s)}`, { settings: s });
     },
   );
@@ -693,7 +693,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       annotations: { idempotentHint: true },
     },
     async (g) => {
-      const st = store.load();
+      const st = await store.load();
       const accountIds: string[] = [];
       for (const ref of g.accounts) {
         const a = findAccount(st, ref);
@@ -713,9 +713,9 @@ export function createServer({ store }: ServerOptions): McpServer {
         accountIds: g.accounts.length ? accountIds : ex?.accountIds ?? [],
         status: g.status ?? ex?.status ?? 'active',
       };
-      if (makePrimary) for (const other of st.goals) if (other.id !== goal.id && other.primary) store.upsertGoal({ ...other, primary: false });
-      store.upsertGoal(goal);
-      const { st: s2, L, c } = load();
+      if (makePrimary) for (const other of st.goals) if (other.id !== goal.id && other.primary) await store.upsertGoal({ ...other, primary: false });
+      await store.upsertGoal(goal);
+      const { st: s2, L, c } = await load();
       const gp = goalProgress(s2, c, goal);
       const T = t(L).goals;
       const cur = c.currency;
@@ -736,15 +736,15 @@ export function createServer({ store }: ServerOptions): McpServer {
       annotations: { destructiveHint: true },
     },
     async ({ goal }) => {
-      const st = store.load();
+      const st = await store.load();
       const r = goal.trim().toLowerCase();
       const g =
         st.goals.find((x) => x.id === goal) ??
         st.goals.find((x) => (x.name ?? '').toLowerCase() === r) ??
         st.goals.find((x) => x.kind === r);
       if (!g) return fail(`No goal matches "${goal}".`);
-      store.deleteGoal(g.id);
-      const { L } = load();
+      await store.deleteGoal(g.id);
+      const { L } = await load();
       return ok(`${L === 'it' ? 'Obiettivo eliminato' : 'Deleted goal'}: ${goalLabel(g, L)}.`);
     },
   );
@@ -761,7 +761,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       _meta: { ui: { resourceUri: UI_URI } },
     },
     async ({ save, capitalUse, ...a }) => {
-      const st = store.load();
+      const st = await store.load();
       const cu: Record<string, number> = {};
       for (const x of capitalUse) {
         const m = findMember(st, x.member);
@@ -770,8 +770,8 @@ export function createServer({ store }: ServerOptions): McpServer {
       }
       const prev = a.id ? st.scenarios.find((s) => s.id === a.id) : undefined;
       const sc: HomeScenario = { ...(prev ?? {}), ...a, id: a.id ?? newId('home'), capitalUse: { ...(prev?.capitalUse ?? {}), ...cu } };
-      if (save) store.upsertScenario(sc);
-      const { st: s2, L, c } = load();
+      if (save) await store.upsertScenario(sc);
+      const { st: s2, L, c } = await load();
       const r = simulateHome(s2, c, sc);
       const T = t(L).home;
       const cur = c.currency;
@@ -799,7 +799,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       inputSchema: z.object({ id: z.string() }),
       annotations: { destructiveHint: true },
     },
-    async ({ id }) => (store.deleteScenario(id) ? ok('Deleted.') : fail('Not found.')),
+    async ({ id }) => ((await store.deleteScenario(id)) ? ok('Deleted.') : fail('Not found.')),
   );
 
   registerAppTool(
@@ -823,7 +823,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       _meta: { ui: { resourceUri: UI_URI } },
     },
     async (p) => {
-      const { st, L, c } = load();
+      const { st, L, c } = await load();
       const r = simulatePurchase(st, c, p);
       const T = t(L).purchase;
       const cur = c.currency;
@@ -856,7 +856,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       _meta: { ui: { resourceUri: UI_URI } },
     },
     async (p) => {
-      const { st, L, c } = load();
+      const { st, L, c } = await load();
       const r = purchaseBudget(st, c, p);
       const T = t(L).purchaseBudget;
       const cur = c.currency;
@@ -883,7 +883,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       annotations: { readOnlyHint: true },
     },
     async () => {
-      const st = store.load();
+      const st = await store.load();
       return ok(JSON.stringify({ format: 'conti-mcp', exportedAt: new Date().toISOString(), state: st }, null, 2));
     },
   );
@@ -912,8 +912,8 @@ export function createServer({ store }: ServerOptions): McpServer {
       else if (raw && typeof raw === 'object' && 'state' in raw) st = (raw as { state: State }).state;
       else return fail('Unrecognized format.');
       if (!Array.isArray(st.members) || !Array.isArray(st.accounts)) return fail('Backup is missing members/accounts.');
-      store.replaceAll(st);
-      const { st: s2, L, c } = load();
+      await store.replaceAll(st);
+      const { st: s2, L, c } = await load();
       return ok(`Imported ${s2.members.length} members, ${s2.accounts.length} accounts, ${s2.snapshots.length} balances, ${s2.incomes.length} incomes.\n\n${overviewText(s2, c, L)}`);
     },
   );

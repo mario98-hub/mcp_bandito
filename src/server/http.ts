@@ -34,8 +34,8 @@ export function startHttp(o: HttpOptions) {
   const handler = createMcpHandler(() => createServer({ store: o.store }));
   const node = toNodeHandler(handler);
 
-  app.get('/health', (_req, res) => {
-    res.json({ ok: true, name: 'conti-mcp', version: VERSION, revision: o.store.revision() });
+  app.get('/health', async (_req, res) => {
+    res.json({ ok: true, name: 'conti-mcp', version: VERSION, revision: await o.store.revision() });
   });
   app.get('/', (_req, res) => {
     res.type('text/plain').send('Conti MCP server. Endpoint: /mcp' + (o.token ? '/<token> or /mcp with Authorization: Bearer <token>' : ''));

@@ -1,10 +1,13 @@
 /**
- * SQLite persistence (node:sqlite, no native dependencies).
+ * libSQL persistence (@libsql/client), one code path for a local file and for
+ * a remote Turso database — selected by the connection URL:
+ *   - file:/data/conti.db        local SQLite file (dev, stdio, home server)
+ *   - libsql://<db>.turso.io      Turso cloud, with an auth token
  *
  * The data set of a household is tiny (a few thousand rows after decades),
  * so the store is a simple document table loaded in full on each read.
  */
-import { DatabaseSync } from 'node:sqlite';
+import { createClient, type Client, type Transaction } from '@libsql/client';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -26,6 +29,9 @@ import {
 type Collection = 'members' | 'accounts' | 'snapshots' | 'incomes' | 'budget' | 'scenarios' | 'goals';
 const COLLECTIONS: Collection[] = ['members', 'accounts', 'snapshots', 'incomes', 'budget', 'scenarios', 'goals'];
 
+/** Anything we can run a statement against: the connection or an open transaction. */
+type Exec = Pick<Client, 'execute'> | Transaction;
+
 export const newId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 10)}`;
 export const slug = (s: string) =>
   s
@@ -36,15 +42,45 @@ export const slug = (s: string) =>
     .replace(/^-|-$/g, '')
     .slice(0, 32) || 'x';
 
-export class Store {
-  readonly db: DatabaseSync;
+export interface StoreConfig {
+  /** libSQL URL: `file:/path/conti.db` or `libsql://<db>.turso.io`. */
+  url: string;
+  /** Auth token, required for remote (libsql://) databases. */
+  authToken?: string;
+}
 
-  constructor(readonly path: string) {
-    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA busy_timeout = 5000;
+export class Store {
+  readonly client: Client;
+  /** Serializes write transactions: a single logical connection, one writer at a time. */
+  private queue: Promise<unknown> = Promise.resolve();
+
+  private constructor(client: Client, readonly url: string) {
+    this.client = client;
+  }
+
+  /** Open a store and ensure the schema exists. */
+  static async open(config: StoreConfig): Promise<Store> {
+    // libSQL does not create the parent directory of a local file; make sure it exists.
+    if (config.url.startsWith('file:')) {
+      try {
+        const p = new URL(config.url).pathname;
+        if (p) mkdirSync(dirname(p), { recursive: true });
+      } catch {
+        /* unparseable file: URL — let createClient surface the error */
+      }
+    }
+    const client = createClient({ url: config.url, authToken: config.authToken });
+    const store = new Store(client, config.url);
+    await store.migrate();
+    return store;
+  }
+
+  private async migrate() {
+    // WAL/busy_timeout only mean something for a local file; Turso manages concurrency itself.
+    if (this.url.startsWith('file:')) {
+      await this.client.executeMultiple('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+    }
+    await this.client.executeMultiple(`
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS docs (
         collection TEXT NOT NULL,
@@ -63,33 +99,31 @@ export class Store {
   }
 
   close() {
-    this.db.close();
+    this.client.close();
   }
 
   // ------------------------------------------------------------ read
 
-  private meta<T>(key: string): T | null {
-    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined;
-    return row ? (JSON.parse(row.value) as T) : null;
+  private async meta<T>(key: string, ex: Exec = this.client): Promise<T | null> {
+    const rs = await ex.execute({ sql: 'SELECT value FROM meta WHERE key = ?', args: [key] });
+    const row = rs.rows[0];
+    return row ? (JSON.parse(row.value as string) as T) : null;
   }
 
-  load(): State {
+  async load(ex: Exec = this.client): Promise<State> {
     const s = emptyState();
-    s.revision = this.meta<number>('revision') ?? 0;
-    s.household = this.meta<Household>('household');
-    s.settings = { ...DEFAULT_SETTINGS, ...(this.meta<Partial<Settings>>('settings') ?? {}) };
-    const rows = this.db.prepare('SELECT collection, data FROM docs ORDER BY collection, id').all() as {
-      collection: Collection;
-      data: string;
-    }[];
-    for (const r of rows) {
-      const arr = s[r.collection] as unknown[] | undefined;
-      if (Array.isArray(arr)) arr.push(JSON.parse(r.data));
+    s.revision = (await this.meta<number>('revision', ex)) ?? 0;
+    s.household = await this.meta<Household>('household', ex);
+    s.settings = { ...DEFAULT_SETTINGS, ...((await this.meta<Partial<Settings>>('settings', ex)) ?? {}) };
+    const rs = await ex.execute({ sql: 'SELECT collection, data FROM docs ORDER BY collection, id' });
+    for (const r of rs.rows) {
+      const arr = s[r.collection as Collection] as unknown[] | undefined;
+      if (Array.isArray(arr)) arr.push(JSON.parse(r.data as string));
     }
     // stable, meaningful ordering
     s.snapshots.sort((a, b) => a.month.localeCompare(b.month) || a.accountId.localeCompare(b.accountId));
     s.incomes.sort((a, b) => a.month.localeCompare(b.month) || a.memberId.localeCompare(b.memberId));
-    const order = (this.meta<Record<string, string[]>>('order') ?? {}) as Record<string, string[]>;
+    const order = ((await this.meta<Record<string, string[]>>('order', ex)) ?? {}) as Record<string, string[]>;
     for (const c of ['members', 'accounts', 'budget', 'scenarios', 'goals'] as const) {
       const o = order[c];
       if (o) (s[c] as { id: string }[]).sort((a, b) => idx(o, a.id) - idx(o, b.id));
@@ -97,143 +131,167 @@ export class Store {
     return s;
   }
 
-  revision(): number {
-    return this.meta<number>('revision') ?? 0;
+  async revision(): Promise<number> {
+    return (await this.meta<number>('revision')) ?? 0;
   }
 
-  changelog(limit = 20) {
-    return this.db.prepare('SELECT at, action, detail FROM changelog ORDER BY seq DESC LIMIT ?').all(limit);
+  async changelog(limit = 20) {
+    const rs = await this.client.execute({ sql: 'SELECT at, action, detail FROM changelog ORDER BY seq DESC LIMIT ?', args: [limit] });
+    return rs.rows;
   }
 
   // ------------------------------------------------------------ write helpers
 
-  private setMeta(key: string, value: unknown) {
-    this.db.prepare('INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, JSON.stringify(value));
+  private async setMeta(ex: Exec, key: string, value: unknown) {
+    await ex.execute({
+      sql: 'INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      args: [key, JSON.stringify(value)],
+    });
   }
-  private put(c: Collection, id: string, data: unknown) {
-    this.db
-      .prepare('INSERT INTO docs(collection, id, data, updated_at) VALUES(?, ?, ?, ?) ON CONFLICT(collection, id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at')
-      .run(c, id, JSON.stringify(data), new Date().toISOString());
+  private async put(ex: Exec, c: Collection, id: string, data: unknown) {
+    await ex.execute({
+      sql: 'INSERT INTO docs(collection, id, data, updated_at) VALUES(?, ?, ?, ?) ON CONFLICT(collection, id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at',
+      args: [c, id, JSON.stringify(data), new Date().toISOString()],
+    });
     if (c === 'members' || c === 'accounts' || c === 'budget' || c === 'scenarios' || c === 'goals') {
-      const order = this.meta<Record<string, string[]>>('order') ?? {};
+      const order = (await this.meta<Record<string, string[]>>('order', ex)) ?? {};
       const o = (order[c] ??= []);
       if (!o.includes(id)) {
         o.push(id);
-        this.setMeta('order', order);
+        await this.setMeta(ex, 'order', order);
       }
     }
   }
-  private del(c: Collection, id: string) {
-    return Number(this.db.prepare('DELETE FROM docs WHERE collection = ? AND id = ?').run(c, id).changes) > 0;
+  private async del(ex: Exec, c: Collection, id: string) {
+    const rs = await ex.execute({ sql: 'DELETE FROM docs WHERE collection = ? AND id = ?', args: [c, id] });
+    return rs.rowsAffected > 0;
   }
 
-  /** Run a mutation atomically and bump the revision. */
-  tx<T>(action: string, detail: unknown, fn: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const out = fn();
-      this.setMeta('revision', this.revision() + 1);
-      this.db
-        .prepare('INSERT INTO changelog(at, action, detail) VALUES(?, ?, ?)')
-        .run(new Date().toISOString(), action, detail === undefined ? null : JSON.stringify(detail).slice(0, 2000));
-      this.db.exec('COMMIT');
-      return out;
-    } catch (e) {
-      this.db.exec('ROLLBACK');
-      throw e;
-    }
+  /** Run a mutation atomically and bump the revision. Writes are serialized. */
+  tx<T>(action: string, detail: unknown, fn: (ex: Transaction) => Promise<T>): Promise<T> {
+    const run = async (): Promise<T> => {
+      const tx = await this.client.transaction('write');
+      try {
+        const out = await fn(tx);
+        await this.setMeta(tx, 'revision', ((await this.meta<number>('revision', tx)) ?? 0) + 1);
+        await tx.execute({
+          sql: 'INSERT INTO changelog(at, action, detail) VALUES(?, ?, ?)',
+          args: [new Date().toISOString(), action, detail === undefined ? null : JSON.stringify(detail).slice(0, 2000)],
+        });
+        await tx.commit();
+        return out;
+      } catch (e) {
+        try {
+          await tx.rollback();
+        } catch {
+          /* already closed */
+        }
+        throw e;
+      } finally {
+        tx.close();
+      }
+    };
+    const result = this.queue.then(run, run);
+    this.queue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   // ------------------------------------------------------------ mutations
 
   setHousehold(h: Household) {
-    this.tx('household', h, () => this.setMeta('household', h));
+    return this.tx('household', h, (ex) => this.setMeta(ex, 'household', h));
   }
 
   updateSettings(patch: Partial<Settings>) {
-    return this.tx('settings', patch, () => {
-      const cur = { ...DEFAULT_SETTINGS, ...(this.meta<Partial<Settings>>('settings') ?? {}) };
+    return this.tx('settings', patch, async (ex) => {
+      const cur = { ...DEFAULT_SETTINGS, ...((await this.meta<Partial<Settings>>('settings', ex)) ?? {}) };
       const next = { ...cur, ...patch };
-      this.setMeta('settings', next);
+      await this.setMeta(ex, 'settings', next);
       return next;
     });
   }
 
   upsertMember(m: Member) {
-    this.tx('member', m, () => this.put('members', m.id, m));
+    return this.tx('member', m, (ex) => this.put(ex, 'members', m.id, m));
   }
   /** Removes a member, their incomes and their account shares. */
   removeMember(id: string) {
-    return this.tx('member.remove', { id }, () => {
-      const st = this.load();
-      for (const i of st.incomes.filter((i) => i.memberId === id)) this.del('incomes', `${i.memberId}|${i.month}`);
+    return this.tx('member.remove', { id }, async (ex) => {
+      const st = await this.load(ex);
+      for (const i of st.incomes.filter((i) => i.memberId === id)) await this.del(ex, 'incomes', `${i.memberId}|${i.month}`);
       for (const a of st.accounts.filter((a) => a.owners.some((o) => o.memberId === id))) {
-        this.put('accounts', a.id, { ...a, owners: a.owners.filter((o) => o.memberId !== id) });
+        await this.put(ex, 'accounts', a.id, { ...a, owners: a.owners.filter((o) => o.memberId !== id) });
       }
-      for (const b of st.budget.filter((b) => b.ownerId === id)) this.put('budget', b.id, { ...b, ownerId: null });
-      return this.del('members', id);
+      for (const b of st.budget.filter((b) => b.ownerId === id)) await this.put(ex, 'budget', b.id, { ...b, ownerId: null });
+      return this.del(ex, 'members', id);
     });
   }
 
   upsertAccount(a: Account) {
-    this.tx('account', a, () => this.put('accounts', a.id, a));
+    return this.tx('account', a, (ex) => this.put(ex, 'accounts', a.id, a));
   }
   deleteAccount(id: string) {
-    return this.tx('account.delete', { id }, () => {
-      this.db.prepare("DELETE FROM docs WHERE collection = 'snapshots' AND id LIKE ?").run(`${id}|%`);
-      return this.del('accounts', id);
+    return this.tx('account.delete', { id }, async (ex) => {
+      await ex.execute({ sql: "DELETE FROM docs WHERE collection = 'snapshots' AND id LIKE ?", args: [`${id}|%`] });
+      return this.del(ex, 'accounts', id);
     });
   }
 
   recordMonth(snapshots: Snapshot[], incomes: Income[]) {
     const now = new Date().toISOString();
-    this.tx('month', { snapshots: snapshots.length, incomes: incomes.length, months: [...new Set([...snapshots, ...incomes].map((x) => x.month))] }, () => {
-      for (const s of snapshots) this.put('snapshots', `${s.accountId}|${s.month}`, { ...s, updatedAt: now });
-      for (const i of incomes) this.put('incomes', `${i.memberId}|${i.month}`, { ...i, updatedAt: now });
-    });
+    return this.tx(
+      'month',
+      { snapshots: snapshots.length, incomes: incomes.length, months: [...new Set([...snapshots, ...incomes].map((x) => x.month))] },
+      async (ex) => {
+        for (const s of snapshots) await this.put(ex, 'snapshots', `${s.accountId}|${s.month}`, { ...s, updatedAt: now });
+        for (const i of incomes) await this.put(ex, 'incomes', `${i.memberId}|${i.month}`, { ...i, updatedAt: now });
+      },
+    );
   }
   deleteEntries(month: string, accountIds: string[], memberIds: string[]) {
-    return this.tx('month.delete', { month, accountIds, memberIds }, () => {
+    return this.tx('month.delete', { month, accountIds, memberIds }, async (ex) => {
       let n = 0;
-      for (const a of accountIds) n += Number(this.del('snapshots', `${a}|${month}`));
-      for (const m of memberIds) n += Number(this.del('incomes', `${m}|${month}`));
+      for (const a of accountIds) n += Number(await this.del(ex, 'snapshots', `${a}|${month}`));
+      for (const m of memberIds) n += Number(await this.del(ex, 'incomes', `${m}|${month}`));
       return n;
     });
   }
 
   upsertBudgetItem(b: BudgetItem) {
-    this.tx('budget', b, () => this.put('budget', b.id, b));
+    return this.tx('budget', b, (ex) => this.put(ex, 'budget', b.id, b));
   }
   deleteBudgetItem(id: string) {
-    return this.tx('budget.delete', { id }, () => this.del('budget', id));
+    return this.tx('budget.delete', { id }, (ex) => this.del(ex, 'budget', id));
   }
 
   upsertScenario(s: HomeScenario) {
-    this.tx('scenario', s, () => this.put('scenarios', s.id, s));
+    return this.tx('scenario', s, (ex) => this.put(ex, 'scenarios', s.id, s));
   }
   deleteScenario(id: string) {
-    return this.tx('scenario.delete', { id }, () => this.del('scenarios', id));
+    return this.tx('scenario.delete', { id }, (ex) => this.del(ex, 'scenarios', id));
   }
 
   upsertGoal(g: Goal) {
-    this.tx('goal', g, () => this.put('goals', g.id, g));
+    return this.tx('goal', g, (ex) => this.put(ex, 'goals', g.id, g));
   }
   deleteGoal(id: string) {
-    return this.tx('goal.delete', { id }, () => this.del('goals', id));
+    return this.tx('goal.delete', { id }, (ex) => this.del(ex, 'goals', id));
   }
 
   /** Replace everything with the given state (used by import). */
   replaceAll(s: State) {
-    this.tx('import', { members: s.members.length, accounts: s.accounts.length, snapshots: s.snapshots.length }, () => {
-      this.db.exec('DELETE FROM docs');
-      this.db.prepare("DELETE FROM meta WHERE key IN ('order','household','settings')").run();
-      if (s.household) this.setMeta('household', s.household);
-      this.setMeta('settings', { ...DEFAULT_SETTINGS, ...s.settings });
+    return this.tx('import', { members: s.members.length, accounts: s.accounts.length, snapshots: s.snapshots.length }, async (ex) => {
+      await ex.execute({ sql: 'DELETE FROM docs' });
+      await ex.execute({ sql: "DELETE FROM meta WHERE key IN ('order','household','settings')" });
+      if (s.household) await this.setMeta(ex, 'household', s.household);
+      await this.setMeta(ex, 'settings', { ...DEFAULT_SETTINGS, ...s.settings });
       for (const c of COLLECTIONS) {
         for (const d of (s[c] ?? []) as unknown as Record<string, string>[]) {
-          const id =
-            c === 'snapshots' ? `${d.accountId}|${d.month}` : c === 'incomes' ? `${d.memberId}|${d.month}` : d.id!;
-          this.put(c, id, d);
+          const id = c === 'snapshots' ? `${d.accountId}|${d.month}` : c === 'incomes' ? `${d.memberId}|${d.month}` : d.id!;
+          await this.put(ex, c, id, d);
         }
       }
     });

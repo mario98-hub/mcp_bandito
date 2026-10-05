@@ -5,20 +5,12 @@
  *   --http               Streamable HTTP server (personal cloud / home server)
  *   --port <n>           HTTP port (default $PORT or 3333)
  *   --host <h>           bind address (default 127.0.0.1; 0.0.0.0 in containers)
- *   --db <path>          SQLite file (default $CONTI_DB or ~/.conti/conti.db)
+ *   --db <url>           libSQL URL or file path (default $CONTI_DB or ~/.conti/conti.db)
  *   --demo               seed the database with fictional demo data if it is empty
  *   --new-token          print a random token for CONTI_TOKEN and exit
  */
-// node:sqlite prints an ExperimentalWarning on Node 22; keep stderr clean.
-const emit = process.emitWarning.bind(process);
-process.emitWarning = ((w: string | Error, ...rest: unknown[]) => {
-  const msg = typeof w === 'string' ? w : w?.message;
-  if (msg && msg.includes('SQLite')) return;
-  return (emit as (...a: unknown[]) => void)(w, ...rest);
-}) as typeof process.emitWarning;
-
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 const args = process.argv.slice(2);
@@ -27,6 +19,11 @@ const opt = (n: string) => {
   const i = args.indexOf(`--${n}`);
   return i >= 0 ? args[i + 1] : undefined;
 };
+
+/** Turn a --db value into a libSQL URL: pass through libsql://, file:, http(s), ws(s); otherwise treat it as a file path. */
+function toLibsqlUrl(db: string): string {
+  return /^(libsql|file|https?|wss?):/.test(db) ? db : `file:${resolve(db)}`;
+}
 
 async function main() {
   if (flag('help') || flag('h')) {
@@ -37,13 +34,15 @@ Usage:
   npx conti-mcp --http          HTTP server for claude.ai web & mobile
 
 Options:
-  --db <path>       SQLite database (env CONTI_DB, default ~/.conti/conti.db)
+  --db <url>        libSQL database: file path, file: URL, or Turso libsql:// URL
+                    (env CONTI_DB, default ~/.conti/conti.db)
   --port <n>        HTTP port (env PORT, default 3333)
   --host <addr>     HTTP bind address (env HOST, default 127.0.0.1)
   --demo            fill an empty database with fictional demo data
   --new-token       print a random secret for CONTI_TOKEN
 Env:
   CONTI_TOKEN       required for --http on a non-local address
+  CONTI_DB_AUTH_TOKEN  auth token for a remote Turso database (or TURSO_AUTH_TOKEN)
   CONTI_ALLOWED_HOSTS  comma-separated public hostnames (DNS-rebinding protection)`);
     return;
   }
@@ -54,11 +53,12 @@ Env:
 
   const { Store } = await import('./store/store.js');
   const dbPath = opt('db') ?? process.env.CONTI_DB ?? join(homedir(), '.conti', 'conti.db');
-  const store = new Store(dbPath);
+  const authToken = process.env.CONTI_DB_AUTH_TOKEN || process.env.TURSO_AUTH_TOKEN || undefined;
+  const store = await Store.open({ url: toLibsqlUrl(dbPath), authToken });
 
-  if (flag('demo') && !store.load().household) {
+  if (flag('demo') && !(await store.load()).household) {
     const { demoState } = await import('./core/demo.js');
-    store.replaceAll(demoState());
+    await store.replaceAll(demoState());
     console.error('[conti] demo data loaded');
   }
 

@@ -37,6 +37,7 @@
     "preview": "node scripts/build.mjs && node scripts/dev-host.mjs"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "@modelcontextprotocol/client": "^2.2.0",
     "@modelcontextprotocol/express": "^2.0.1",
     "@modelcontextprotocol/ext-apps": "^2.0.3",
