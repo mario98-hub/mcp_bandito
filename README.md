@@ -82,6 +82,12 @@ Once added, it's available in claude.ai, the mobile apps and Claude Desktop. Ste
 
 > The secret in the URL is the only key to your data: treat the URL like a password. OAuth is on the roadmap.
 
+**No-server, all-browser option (free):** host the data in [Turso](https://turso.tech) (managed libSQL, free tier) and deploy the server on Render straight from this repo — no local setup, no credit card.
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/mario98-hub/mcp_bandito)
+
+Create a database + token in the Turso dashboard, click the button (it reads [`render.yaml`](render.yaml)), paste the two Turso values, and use the connector URL Render gives you. Full walkthrough in [docs/DEPLOY.md](docs/DEPLOY.md#render--turso-free-all-from-the-browser).
+
 ## Guided setup & goals
 
 First time, say *"Set up Conti for me"*. Claude walks through a short, resumable setup. There is no saved "progress" flag: every step is derived from your data, so you can stop and continue from any device.
@@ -130,7 +136,8 @@ You can also type the numbers into the **Month** tab of the dashboard.
 
 | Flag / env | Default | |
 | --- | --- | --- |
-| `--db`, `CONTI_DB` | `~/.conti/conti.db` | SQLite file |
+| `--db`, `CONTI_DB` | `~/.conti/conti.db` | libSQL database: a file path, a `file:` URL, or a Turso `libsql://…` URL |
+| `CONTI_DB_AUTH_TOKEN` | none | Auth token for a remote Turso database (also read from `TURSO_AUTH_TOKEN`) |
 | `--http` | off | Streamable HTTP instead of stdio |
 | `--port`, `PORT` | `3333` | HTTP port |
 | `--host`, `HOST` | `127.0.0.1` | HTTP bind address (`0.0.0.0` in Docker) |
@@ -147,7 +154,7 @@ npm run preview   # local MCP Apps host with demo data at http://localhost:5174
 ```
 
 - `src/core`: pure calculation engine (`engine.ts`), data model, i18n, legacy importer
-- `src/store`: SQLite persistence (`node:sqlite`, no native dependencies)
+- `src/store`: libSQL persistence (`@libsql/client`) — one code path for a local file or a remote Turso database
 - `src/server`: MCP tools, UI resource, HTTP transport and auth
 - `src/ui`: the dashboard, bundled into one HTML file served as `ui://conti/dashboard.html`
 
