@@ -2,8 +2,6 @@
 
 **Household finances, one snapshot a month. An open-source MCP App for Claude and any MCP Apps host.**
 
-[Italiano](README.it.md)
-
 Conti keeps a household's money in order without bank connections or transaction categorisation. Once a month you send Claude screenshots of your banking apps (or just the numbers). Claude reads the balances, saves them, and from that alone Conti works out:
 
 - **Net worth** per person and for the household, after tax on unrealized gains
@@ -22,16 +20,22 @@ The dashboard renders **inline in the conversation** (MCP Apps), and because Cla
 
 ## How it works
 
+```mermaid
+flowchart LR
+    You([You]) -->|screenshots / numbers| Claude
+    Claude -->|conti_record_month, tools| Server[Conti MCP server]
+    Server -->|read / write| DB[(libSQL · yours)]
+    Server -->|ui:// resource| Dash[Dashboard · MCP App]
+    Dash -->|callServerTool| Server
+    Claude -->|conti_dashboard| Dash
 ```
- you ──screenshots──▶ Claude ──conti_record_month──▶ Conti server ──▶ SQLite (yours)
-                        ▲                                  │
-                        └──── dashboard (MCP App), tools ◀─┘
-```
+
+See [docs/architecture.md](docs/architecture.md) for the full picture.
 
 - **One snapshot a month**: month-end balance of each account (plus unrealized gains for investments) and each person's net income.
 - **Savings = change in invested capital** between two months; **spending = income − savings**. Gains don't count as savings, so market swings don't distort the picture.
 - **1 to N people**: each account is owned by one or more people with shares, or shared by the household. Joint accounts can record personal deposits month by month.
-- **Your data stays yours**: a single SQLite file on your computer or on your own server. No telemetry, no third-party APIs.
+- **Your data stays yours**: a single libSQL database — a local file on your computer, or your own Turso database. No telemetry, no third-party APIs.
 
 ## Install
 
@@ -78,7 +82,7 @@ Put it behind HTTPS (Fly.io, Railway, Render, a VPS with Caddy, or a home server
 https://your-host.example.com/mcp/<your-secret>
 ```
 
-Once added, it's available in claude.ai, the mobile apps and Claude Desktop. Step-by-step guides: [docs/DEPLOY.md](docs/DEPLOY.md).
+Once added, it's available in claude.ai, the mobile apps and Claude Desktop. Step-by-step guide: [docs/deploy.md](docs/deploy.md).
 
 > The secret in the URL is the only key to your data: treat the URL like a password. OAuth is on the roadmap.
 
@@ -86,7 +90,7 @@ Once added, it's available in claude.ai, the mobile apps and Claude Desktop. Ste
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/mario98-hub/mcp_bandito)
 
-Create a database + token in the Turso dashboard, click the button (it reads [`render.yaml`](render.yaml)), paste the two Turso values, and use the connector URL Render gives you. Full walkthrough in [docs/DEPLOY.md](docs/DEPLOY.md#render--turso-free-all-from-the-browser).
+Create a database + token in the Turso dashboard, click the button (it reads [`render.yaml`](render.yaml)), paste the two Turso values, and use the connector URL Render gives you. Full walkthrough in [docs/deploy.md](docs/deploy.md#render--turso-free-all-from-the-browser).
 
 ## Guided setup & goals
 

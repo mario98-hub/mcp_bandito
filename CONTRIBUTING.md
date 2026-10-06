@@ -22,8 +22,7 @@ npm run preview   # dashboard in a local MCP Apps host, with demo data
 
 - More locales and currencies; country presets (capital-gains tax, mortgage rules)
 - OAuth for the HTTP transport
-- Goals (savings targets with dates) and progress tracking
-- CSV export, charts per account
+- CSV export, per-account charts
 
 ## Pull requests
 
