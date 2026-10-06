@@ -17,8 +17,31 @@ import {
 import { demoState } from '../dist/core/demo.js';
 import { emptyState, SHARED } from '../dist/core/types.js';
 import { fromLegacy } from '../dist/core/legacy.js';
+import { STRINGS } from '../dist/core/i18n.js';
 
 const close = (a, b, eps = 0.01) => assert.ok(Math.abs(a - b) < eps, `${a} ≈ ${b}`);
+
+test('i18n: en and it have matching keys and no empty strings', () => {
+  const walk = (a, b, path) => {
+    assert.equal(typeof b, typeof a, `type mismatch at ${path}`);
+    if (typeof a === 'string') {
+      assert.ok(a.length > 0, `empty en string at ${path}`);
+      assert.ok(b.length > 0, `empty it string at ${path}`);
+    } else if (typeof a === 'function') {
+      assert.equal(typeof b, 'function', `it is not a function at ${path}`);
+    } else if (a && typeof a === 'object') {
+      assert.deepEqual(Object.keys(b).sort(), Object.keys(a).sort(), `key mismatch at ${path}`);
+      for (const k of Object.keys(a)) walk(a[k], b[k], `${path}.${k}`);
+    }
+  };
+  walk(STRINGS.en, STRINGS.it, '');
+  // the v0.2 dashboard dicts exist in both locales
+  for (const L of ['en', 'it']) {
+    assert.ok(STRINGS[L].modules.title && STRINGS[L].modules.auto, `${L} modules`);
+    assert.ok(STRINGS[L].goals.toGo, `${L} goals.toGo`);
+    assert.ok(STRINGS[L].purchaseBudget.maxCash && STRINGS[L].purchaseBudget.maxFinanced, `${L} purchaseBudget`);
+  }
+});
 
 test('PMT/PV match Excel', () => {
   // Excel: =PMT(0.035/12, 360, -200000) = 898.09

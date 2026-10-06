@@ -358,12 +358,23 @@ test('http: token required, works with bearer and secret path', async () => {
     const denied = await fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     assert.equal(denied.status, 401);
 
+    // the raccoon mark is served at the domain (so hosts don't fall back to the deploy platform's favicon)
+    const fav = await fetch(`http://127.0.0.1:${port}/favicon.svg`);
+    assert.ok((fav.headers.get('content-type') ?? '').startsWith('image/svg+xml'));
+    assert.match(await fav.text(), /<svg[\s\S]*#f5c84c/);
+
     for (const [url, opts] of [
       [`http://127.0.0.1:${port}/mcp/${token}`, {}],
       [`http://127.0.0.1:${port}/mcp`, { requestInit: { headers: { Authorization: `Bearer ${token}` } } }],
     ]) {
       const c = new Client({ name: 'test', version: '1.0.0' });
       await c.connect(new StreamableHTTPClientTransport(new URL(url), opts));
+      // the server advertises the raccoon icon + website as its MCP identity
+      const info = c.getServerVersion();
+      assert.equal(info.name, 'conti');
+      assert.ok(info.icons?.length, 'server advertises icons');
+      assert.match(info.icons[0].src, /^data:image\/svg\+xml,/);
+      assert.ok(info.websiteUrl, 'server advertises websiteUrl');
       const r = await c.callTool({ name: 'conti_get_overview', arguments: {} });
       assert.match(text(r), /Alex & Sam/);
       await c.close();
