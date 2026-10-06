@@ -11,6 +11,9 @@ import {
   compute,
   isNum,
   onboardingNext,
+  resolveModules,
+  goalProgress,
+  purchaseBudget,
   simulateHome,
   simulatePurchase,
   nextKey,
@@ -19,10 +22,12 @@ import {
   type HomeResult,
   type OnboardingNext,
   type PurchaseInput,
+  type PurchaseBudgetInput,
 } from '../core/engine.js';
-import { SHARED, emptyState, type HomeScenario, type Locale, type State, type Account } from '../core/types.js';
+import { SHARED, emptyState, type HomeScenario, type Locale, type State, type Account, type Goal, type ModuleKey, type ModuleMode } from '../core/types.js';
 import { t, money, pct, num, monthLabel, MONTH_NAMES, type Strings } from '../core/i18n.js';
 import { demoState } from '../core/demo.js';
+import { RACCOON_MARK } from '../core/brand.js';
 
 type Tab = 'overview' | 'month' | 'history' | 'budget' | 'home' | 'purchase' | 'settings';
 const TABS: Tab[] = ['overview', 'month', 'history', 'budget', 'home', 'purchase'];
@@ -44,6 +49,7 @@ const S = {
   homeDraft: null as HomeScenario | null,
   homeId: null as string | null,
   purchase: { name: '', price: 15000, monthlyRunningCost: 0, expectedReturn: 0.03 } as PurchaseInput,
+  pbudget: { rate: 0.08, years: 5, monthlyRunningCost: 0 } as PurchaseBudgetInput,
   openMetrics: new Set<string>(),
   busy: false,
   hover: -1,
@@ -155,15 +161,20 @@ function render() {
   afterRender();
 }
 
-const LOGO = `<svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="13" width="5" height="9" rx="1" fill="var(--c0)"/><rect x="9.5" y="8" width="5" height="14" rx="1" fill="var(--c1)"/><rect x="17" y="3" width="5" height="19" rx="1" fill="var(--accent)"/></svg>`;
+const LOGO = RACCOON_MARK;
 const ICON_FS = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>`;
 const ICON_GEAR = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg>`;
 const ICON_CHAT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg>`;
 
+function visibleTabs(st: State): Tab[] {
+  const mods = resolveModules(st);
+  return TABS.filter((id) => (id === 'home' ? mods.home : id === 'budget' ? mods.fixed : true));
+}
+
 function band(setUp: boolean) {
   const st = S.state!;
   const tabs = setUp
-    ? `<nav class="tabs" role="tablist">${TABS.map((id) => {
+    ? `<nav class="tabs" role="tablist">${visibleTabs(st).map((id) => {
         const dot = id === 'month' && C.statusOf(S.today).overall !== 'ok' ? '<span class="dot" aria-hidden="true"></span>' : '';
         return `<button class="tab" role="tab" data-tab="${id}" aria-selected="${S.tab === id}">${esc(T().tabs[id])}${dot}</button>`;
       }).join('')}</nav>`
@@ -214,6 +225,7 @@ function onboardingPrompt(o: OnboardingNext) {
 }
 
 function renderTab() {
+  if (S.tab !== 'settings' && !visibleTabs(S.state!).includes(S.tab)) S.tab = 'overview';
   switch (S.tab) {
     case 'month': return monthTab();
     case 'history': return historyTab();
@@ -236,14 +248,32 @@ function hero() {
   const delta = prev ? nw.total.realizable - prev.total.realizable : null;
   const ytdBase = [...C.rows].reverse().find((r) => r.month.endsWith('-12') && r.month < nw.asOf!);
   const ytd = ytdBase ? nw.total.realizable - ytdBase.total.realizable : null;
+  const goalLine = goalHeadline();
   return `<div class="hero">
     <div class="label"><span>${esc(T().netWorth)}</span><span>· ${esc(T().asOf)} ${esc(monthLabel(nw.asOf, L()))}</span></div>
     <div class="big" title="${esc(T().netWorthHint)}">${M(nw.total.realizable)}</div>
     ${isNum(delta) ? `<div class="delta"><b>${M(delta, true)}</b> ${L() === 'it' ? 'sul mese prima' : 'vs previous month'}${isNum(ytd) ? ` · <b>${M(ytd, true)}</b> ${L() === 'it' ? 'da inizio anno' : 'year to date'}` : ''}</div>` : ''}
+    ${goalLine}
     <div class="sbar" aria-hidden="true">${pos.map((o) => `<span style="flex-grow:${o.v};background:${ownerColor(o.id)}"></span>`).join('')}</div>
     <div class="legend">${owners.map((o) => `<div style="--sw:${ownerColor(o.id)}"><div class="who">${esc(ownerName(o.id))}</div><div class="val">${M(o.v)}</div></div>`).join('')}
       ${nw.debts ? `<div style="--sw:var(--neg)"><div class="who">${L() === 'it' ? 'di cui debiti' : 'incl. debts'}</div><div class="val">${M(nw.debts)}</div></div>` : ''}</div>
   </div>`;
+}
+
+function goalHeadline() {
+  const st = S.state!;
+  const pg = st.goals.find((g) => g.primary && g.status === 'active');
+  if (!pg) return '';
+  const gp = goalProgress(st, C, pg);
+  const label = esc(goalLabel(pg));
+  const it = L() === 'it';
+  let msg: string;
+  if (isNum(gp.pct) && gp.pct >= 1) msg = it ? `«${label}»: obiettivo raggiunto` : `«${label}»: goal reached`;
+  else if (isNum(gp.target)) {
+    const rem = Math.max(0, gp.target - gp.accumulated);
+    msg = it ? `ancora <b>${M(rem)}</b> per «${label}»${gp.etaDate ? ` · ${esc(monthLabel(gp.etaDate, L()))}` : ''}` : `<b>${M(rem)}</b> to go for «${label}»${gp.etaDate ? ` · ${esc(monthLabel(gp.etaDate, L()))}` : ''}`;
+  } else msg = it ? `verso «${label}»: <b>${M(gp.accumulated)}</b>` : `towards «${label}»: <b>${M(gp.accumulated)}</b>`;
+  return `<div class="delta">${msg}</div>`;
 }
 
 function monthStatusBlock() {
@@ -375,10 +405,52 @@ function healthBlock() {
       .join('')}</div></section>`;
 }
 
+function goalLabel(g: Goal) {
+  return g.name ?? T().goals.kinds[g.kind];
+}
+
+function goalsPrompt() {
+  return L() === 'it'
+    ? 'Guarda i miei obiettivi in Conti: come sto andando su ciascuno e cosa conviene fare per avvicinarmi a quello principale?'
+    : 'Look at my goals in Conti: how am I doing on each, and what should I focus on to get closer to the main one?';
+}
+
+function goalsBlock() {
+  const st = S.state!;
+  const goals = st.goals.filter((g) => g.status !== 'archived');
+  if (!goals.length) return '';
+  const G = T().goals;
+  const sorted = [...goals].sort((a, b) => Number(!!b.primary) - Number(!!a.primary));
+  const items = sorted
+    .map((g) => {
+      const gp = goalProgress(st, C, g);
+      const reached = g.status === 'reached' || (isNum(gp.pct) && gp.pct >= 1);
+      const barColor = reached ? 'var(--ok)' : 'var(--accent)';
+      const remaining = isNum(gp.target) ? Math.max(0, gp.target - gp.accumulated) : null;
+      const meta = isNum(gp.target)
+        ? `${M(gp.accumulated)} / ${M(gp.target)}${gp.etaDate && !reached ? ` · ${esc(monthLabel(gp.etaDate, L()))} ${esc(G.eta)}` : ''}`
+        : `${M(gp.accumulated)} · ${esc(G.noTarget)}`;
+      const chip = reached
+        ? `<span class="chip good">${esc(G.statuses.reached)}</span>`
+        : isNum(gp.pct)
+          ? `<span class="chip info">${P(gp.pct)}</span>`
+          : '';
+      return `<div class="goal">
+        <div class="goal-head"><b>${g.primary ? '<span class="star" aria-hidden="true">★</span> ' : ''}${esc(goalLabel(g))}</b>${chip}</div>
+        ${isNum(gp.pct) ? `<div class="gbar"><span style="width:${Math.round(gp.pct * 100)}%;background:${barColor}"></span></div>` : ''}
+        <div class="row" style="justify-content:space-between;gap:8px"><small>${meta}</small>${isNum(remaining) && !reached ? `<small>${M(remaining)} ${esc(G.toGo)}</small>` : ''}</div>
+      </div>`;
+    })
+    .join('');
+  return `<section><div class="row"><h2 style="margin:0">${esc(G.title)}</h2><span class="spacer"></span>
+    <button class="btn small" data-ask="${esc(goalsPrompt())}">${ICON_CHAT}${esc(T().askClaudeExplain)}</button></div>
+    <div class="goals" style="margin-top:12px">${items}</div></section>`;
+}
+
 function overviewTab() {
   if (!C.latestMonth)
-    return `${monthStatusBlock()}<section><p class="muted">${esc(T().nothingYet)}</p></section>`;
-  return monthStatusBlock() + flowsBlock() + chartBlock() + healthBlock();
+    return `${monthStatusBlock()}${goalsBlock()}<section><p class="muted">${esc(T().nothingYet)}</p></section>`;
+  return monthStatusBlock() + goalsBlock() + flowsBlock() + chartBlock() + healthBlock();
 }
 
 // ------------------------------------------------------------------ month
@@ -770,7 +842,35 @@ function purchaseTab() {
         <dt>${it ? 'Mesi di risparmio' : 'Months of savings'}</dt><dd>${num(r.monthsOfSavings, L(), 1)}</dd>
         <dt>${it ? 'Risparmio mensile dopo' : 'Monthly savings after'}</dt><dd class="${(r.savingsAfter ?? 0) < 0 ? 'neg' : ''}">${M(r.savingsAfter)}</dd>
       </dl></div>
-    </div></section>`;
+    </div></section>
+    ${purchaseBudgetSection()}`;
+}
+
+function purchaseBudgetSection() {
+  const pb = purchaseBudget(S.state!, C, S.pbudget);
+  const Tb = T().purchaseBudget;
+  const it = L() === 'it';
+  const f = (k: keyof PurchaseBudgetInput, label: string, kind: 'pct' | 'num' | 'eur', hint?: string) => {
+    const v = S.pbudget[k];
+    const s = v === undefined || v === null ? '' : kind === 'pct' ? num((v as number) * 100, L(), 2) : String(v);
+    return `<div class="field"><label>${esc(label)}</label><input data-pb="${k}" data-kind="${kind}" inputmode="decimal" value="${esc(s)}">${hint ? `<div class="hint">${esc(hint)}</div>` : ''}</div>`;
+  };
+  const hasFin = isNum(pb.maxFinanced) && isNum(pb.maxLoanAmount);
+  return `<section><h2>${esc(Tb.title)}</h2>
+    <p class="sub">${it ? 'Quanto potete spendere mantenendo intatto il fondo emergenze: in contanti, o con un finanziamento fino a una rata sostenibile.' : 'How much you can spend while keeping the emergency fund intact: in cash, or with financing up to a sustainable payment.'}</p>
+    <div class="card"><div class="fields">
+      ${f('rate', it ? 'Tasso finanziamento' : 'Loan rate', 'pct', '%')}${f('years', it ? 'Durata (anni)' : 'Loan years', 'num')}${f('monthlyRunningCost', it ? 'Costi mensili extra' : 'Extra monthly costs', 'eur', it ? 'assicurazione, manutenzione…' : 'insurance, upkeep…')}
+    </div></div>
+    <div class="grid2" style="margin-top:14px">
+      <div class="card"><div class="metric" style="cursor:default">
+        <span class="mn">${esc(Tb.maxCash)}</span><span class="mv">${M(pb.maxCash)}</span>
+        ${isNum(pb.emergencyReserve) ? `<span class="why">${M(pb.emergencyReserve)} ${esc(Tb.emergencyReserve)}</span>` : ''}</div></div>
+      <div class="card"><div class="metric" style="cursor:default">
+        <span class="mn">${esc(Tb.maxFinanced)}</span><span class="mv">${hasFin ? M(pb.maxFinanced) : '—'}</span>
+        ${hasFin ? `<span class="why">${M(pb.downUsed)} ${it ? 'anticipo' : 'down'} + ${M(pb.maxLoanAmount)} ${it ? 'prestito' : 'loan'} · ${M((pb.monthlyPaymentCeiling ?? 0) - pb.monthlyRunningCost)}/${it ? 'mese' : 'mo'}</span>` : `<span class="why">${it ? 'Inserisci tasso e durata per l’opzione finanziata' : 'Enter rate and duration for the financed option'}</span>`}</div></div>
+    </div>
+    ${pb.reasons.length ? `<ul class="reasons">${pb.reasons.map((x) => `<li>${esc(Tb.reasons[x])}</li>`).join('')}</ul>` : ''}
+  </section>`;
 }
 
 function purchasePrompt(r: ReturnType<typeof simulatePurchase>) {
@@ -787,6 +887,15 @@ function settingsTab() {
   const st = S.state!;
   const s = st.settings;
   const Ts = T().settings;
+  const mods = resolveModules(st);
+  const modes = st.settings.modules;
+  const Tm = T().modules;
+  const rem = st.settings.reminder ?? {};
+  const Tr = T().reminder;
+  const modBtn = (k: ModuleKey, m: ModuleMode, label: string) =>
+    `<button class="btn small ${(modes[k] ?? 'auto') === m ? 'primary' : ''}" data-mod="${k}:${m}">${esc(label)}</button>`;
+  const modRow = (k: ModuleKey) =>
+    `<div class="row" style="justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)"><span>${esc(Tm[k])} <small class="muted">${mods[k] ? (L() === 'it' ? 'visibile' : 'shown') : (L() === 'it' ? 'nascosta' : 'hidden')}</small></span><span class="row" style="gap:4px">${modBtn(k, 'auto', Tm.auto)}${modBtn(k, 'on', Tm.on)}${modBtn(k, 'off', Tm.off)}</span></div>`;
   const f = (k: string, label: string, v: number | null, kind: 'pct' | 'num') =>
     `<div class="field"><label>${esc(label)}</label><input data-set="${k}" data-kind="${kind}" inputmode="decimal" value="${v === null ? '' : esc(kind === 'pct' ? num(v * 100, L(), 1) : String(v))}">${kind === 'pct' ? '<div class="hint">%</div>' : ''}</div>`;
   const accs = st.accounts
@@ -804,6 +913,12 @@ function settingsTab() {
       <div class="field"><label>${esc(Ts.currency)}</label><input data-set="currency" data-kind="text" maxlength="3" value="${esc(cur())}"></div>
     </div><div class="row" style="margin-top:12px"><button class="btn primary" data-act="settings-save">${esc(T().save)}</button>
     <button class="btn" data-act="export">${esc(Ts.export)}</button></div></div>
+    <div class="card" style="margin-top:14px"><h3>${esc(Tm.title)}</h3><p class="sub">${esc(Tm.hint)}</p>
+      ${(['invest', 'home', 'debt', 'fixed'] as ModuleKey[]).map(modRow).join('')}</div>
+    <div class="card" style="margin-top:14px"><h3>${esc(Tr.title)}</h3><div class="fields">
+      <div class="field"><label>${esc(Tr.day)}</label><input data-set="reminderDay" data-kind="num" inputmode="numeric" value="${rem.day ?? ''}"></div>
+      <div class="field"><label>${esc(L() === 'it' ? 'Canale' : 'Channel')}</label><select data-set="reminderChannel" data-kind="text"><option value="">—</option><option value="calendar" ${rem.channel === 'calendar' ? 'selected' : ''}>${esc(Tr.channels.calendar)}</option><option value="task" ${rem.channel === 'task' ? 'selected' : ''}>${esc(Tr.channels.task)}</option><option value="passive" ${rem.channel === 'passive' ? 'selected' : ''}>${esc(Tr.channels.passive)}</option></select></div>
+      </div><div class="row" style="margin-top:12px"><button class="btn primary" data-act="settings-save">${esc(T().save)}</button></div></div>
     <h3 style="margin-top:22px">${esc(T().members)}</h3><p>${st.members.map((m) => `<span class="sw" style="background:${ownerColor(m.id)}"></span>${esc(m.name)}`).join(' &nbsp; ')}</p>
     <h3 style="margin-top:18px">${esc(T().accounts)}</h3><div class="blist">${accs}</div>
     <p class="sub" style="margin-top:12px">${L() === 'it' ? 'Per aggiungere persone o conti, o cambiare le quote di proprietà, chiedi a Claude.' : 'To add people or accounts, or change ownership shares, ask Claude.'}</p>
@@ -823,6 +938,12 @@ async function saveSettings() {
     if (k === 'referenceYear') patch[k] = v === null ? null : v;
     else if (isNum(v)) patch[k] = kind === 'pct' ? v / 100 : v;
   });
+  const reminder: Record<string, unknown> = {};
+  if (patch.reminderDay !== undefined) reminder.day = patch.reminderDay;
+  if (patch.reminderChannel) reminder.channel = patch.reminderChannel;
+  delete patch.reminderDay;
+  delete patch.reminderChannel;
+  if (Object.keys(reminder).length) patch.reminder = reminder;
   try {
     if (S.demo) {
       const st = S.state!;
@@ -864,7 +985,7 @@ function afterRender() {
 }
 
 root.addEventListener('click', async (ev) => {
-  const el = (ev.target as HTMLElement).closest<HTMLElement>('[data-tab],[data-act],[data-ask],[data-metric],[data-hist],[data-del-budget],[data-archive]');
+  const el = (ev.target as HTMLElement).closest<HTMLElement>('[data-tab],[data-act],[data-ask],[data-metric],[data-hist],[data-del-budget],[data-archive],[data-mod]');
   if (!el) return;
   if (el.dataset.tab) {
     S.tab = el.dataset.tab as Tab;
@@ -898,6 +1019,15 @@ root.addEventListener('click', async (ev) => {
     if (S.demo) a.archived = !a.archived;
     else {
       await callTool('conti_upsert_account', { id: a.id, name: a.name, institution: a.institution, kind: a.kind, owners: a.owners.map((o) => ({ member: o.memberId, share: o.share })), liquid: a.liquid, archived: !a.archived }).catch((e) => toast(e.message));
+      await refresh();
+    }
+    return render();
+  }
+  if (el.dataset.mod) {
+    const [k, mode] = el.dataset.mod.split(':') as [ModuleKey, ModuleMode];
+    if (S.demo) S.state!.settings.modules = { ...S.state!.settings.modules, [k]: mode };
+    else {
+      await callTool('conti_update_settings', { modules: { [k]: mode } }).catch((e) => toast(e.message));
       await refresh();
     }
     return render();
@@ -973,7 +1103,7 @@ root.addEventListener('input', (ev) => {
     if (hasBar !== Object.keys(S.monthDraft).length > 0) rerenderKeepingFocus();
     return;
   }
-  const live = el.dataset.home ?? el.dataset.buy ?? el.dataset.use;
+  const live = el.dataset.home ?? el.dataset.buy ?? el.dataset.use ?? el.dataset.pb;
   if (!live) return;
   if (el.dataset.use && S.homeDraft) {
     const v = parseNum(el.value, true);
@@ -992,6 +1122,10 @@ root.addEventListener('input', (ev) => {
       const v = parseNum(el.value, el.dataset.kind === 'pct');
       (S.purchase as unknown as Record<string, unknown>)[k] = v === null ? undefined : isNum(v) ? (el.dataset.kind === 'pct' ? v / 100 : v) : (S.purchase as unknown as Record<string, unknown>)[k];
     }
+  } else if (el.dataset.pb) {
+    const k = el.dataset.pb as keyof PurchaseBudgetInput;
+    const v = parseNum(el.value, el.dataset.kind === 'pct');
+    (S.pbudget as unknown as Record<string, unknown>)[k] = v === null ? undefined : isNum(v) ? (el.dataset.kind === 'pct' ? v / 100 : v) : (S.pbudget as unknown as Record<string, unknown>)[k];
   }
   clearTimeout(inputTimer);
   inputTimer = window.setTimeout(rerenderKeepingFocus, 250);

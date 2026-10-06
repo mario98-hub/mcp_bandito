@@ -136,6 +136,7 @@ const en = {
     progress: 'Progress',
     eta: 'at this pace',
     noTarget: 'no target set',
+    toGo: 'to go',
   },
   onboardingSteps: {
     who: 'Who is in the household',
@@ -150,6 +151,17 @@ const en = {
     title: 'Monthly reminder',
     day: 'Day of the month',
     channels: { calendar: 'Calendar event', task: 'Claude scheduled task', passive: 'Only in the dashboard' },
+  },
+  modules: {
+    title: 'Sections',
+    hint: '“Auto” follows your goals and data. Turn a section on or off by hand.',
+    invest: 'Investments',
+    home: 'Home',
+    debt: 'Debts',
+    fixed: 'Fixed costs',
+    auto: 'Auto',
+    on: 'On',
+    off: 'Off',
   },
   purchaseBudget: {
     title: 'How much can I spend?',
@@ -313,6 +325,7 @@ const it: Dict = {
     progress: 'Avanzamento',
     eta: 'a questo ritmo',
     noTarget: 'nessun obiettivo impostato',
+    toGo: 'ancora',
   },
   onboardingSteps: {
     who: 'Chi c’è in famiglia',
@@ -327,6 +340,17 @@ const it: Dict = {
     title: 'Promemoria mensile',
     day: 'Giorno del mese',
     channels: { calendar: 'Evento in calendario', task: 'Attività programmata di Claude', passive: 'Solo nella dashboard' },
+  },
+  modules: {
+    title: 'Sezioni',
+    hint: '“Auto” segue obiettivi e dati. Attiva o disattiva una sezione a mano.',
+    invest: 'Investimenti',
+    home: 'Casa',
+    debt: 'Debiti',
+    fixed: 'Spese fisse',
+    auto: 'Auto',
+    on: 'Sì',
+    off: 'No',
   },
   purchaseBudget: {
     title: 'Quanto posso spendere?',
