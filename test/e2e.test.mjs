@@ -30,7 +30,7 @@ test('stdio: full monthly workflow', async () => {
   const c = await stdioClient(join(dir, 'a.db'));
   try {
     const tools = (await c.listTools()).tools.map((t) => t.name);
-    for (const n of ['conti_setup', 'conti_record_month', 'conti_dashboard', 'conti_home_scenario', 'conti_simulate_purchase', 'conti_health_check'])
+    for (const n of ['conti_setup', 'conti_record_month', 'conti_dashboard', 'conti_home_scenario', 'conti_save_home_scenario', 'conti_simulate_purchase', 'conti_health_check'])
       assert.ok(tools.includes(n), n);
     const dash = (await c.listTools()).tools.find((t) => t.name === 'conti_dashboard');
     assert.equal(dash._meta.ui.resourceUri, 'ui://conti/dashboard.html');
@@ -86,7 +86,7 @@ test('stdio: full monthly workflow', async () => {
     assert.ok(!r.isError, text(r));
     r = await c.callTool({ name: 'conti_simulate_purchase', arguments: { name: 'Divano', price: 1500 } });
     assert.match(text(r), /Divano/);
-    r = await c.callTool({ name: 'conti_home_scenario', arguments: { name: 'Bilocale', price: 250000, rate: 0.03, closingCosts: 8000, save: true } });
+    r = await c.callTool({ name: 'conti_save_home_scenario', arguments: { name: 'Bilocale', price: 250000, rate: 0.03, closingCosts: 8000 } });
     assert.ok(!r.isError, text(r));
     assert.equal(r.structuredContent.tab, 'home');
 
@@ -294,10 +294,10 @@ test('stdio: three-person household with shared accounts, debt and goals', async
     assert.match(text(r), /2026-01/);
     assert.match(text(r), /2026-02/);
 
-    // home scenario with a different capital share per member
+    // home scenario (read-only simulation) with a different capital share per member
     r = await c.callTool({
       name: 'conti_home_scenario',
-      arguments: { name: 'Casa', price: 300000, rate: 0.03, closingCosts: 10000, capitalUse: [{ member: 'Anna', share: 0.6 }, { member: 'Bruno', share: 0.5 }, { member: 'Carla', share: 0.7 }], save: true },
+      arguments: { name: 'Casa', price: 300000, rate: 0.03, closingCosts: 10000, capitalUse: [{ member: 'Anna', share: 0.6 }, { member: 'Bruno', share: 0.5 }, { member: 'Carla', share: 0.7 }] },
     });
     assert.ok(!r.isError, text(r));
     assert.equal(r.structuredContent.result.perOwner.filter((o) => o.liquid > 0).length >= 3, true);

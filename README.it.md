@@ -115,7 +115,7 @@ Puoi anche inserire i numeri a mano nella scheda **Il mese** della dashboard.
 | `conti_record_month` / `conti_delete_entries` | Salva o corregge saldi ed entrate di un mese |
 | `conti_upsert_budget_item` / `conti_delete_budget_item` | Spese fisse mensili/annuali e risparmio pianificato |
 | `conti_update_settings` | Tasse sulle plusvalenze, fondo emergenze, rata massima, moduli facoltativi, promemoria mensile, lingua, valuta |
-| `conti_home_scenario` / `conti_delete_home_scenario` | Simulazione acquisto casa (apre la scheda Casa) |
+| `conti_home_scenario` / `conti_save_home_scenario` / `conti_delete_home_scenario` | Simulazione acquisto casa (sola lettura); salva uno scenario; eliminane uno (apre la scheda Casa) |
 | `conti_simulate_purchase` | "Posso permettermelo?" per un acquisto (apre la scheda Acquisto) |
 | `conti_purchase_budget` | "Quanto posso spendere?" in contanti o con finanziamento (apre la scheda Acquisto) |
 | `conti_export` / `conti_import` | Backup e ripristino JSON; importa anche i backup dell'artifact "Conti congiunti" |

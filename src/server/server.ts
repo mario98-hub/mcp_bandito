@@ -422,6 +422,7 @@ export function createServer({ store }: ServerOptions): McpServer {
       title: 'Add or update an account',
       description: 'Create or update one account (bank, broker, pension fund, property, loan). Owners are members with shares; no owners = shared by the household.',
       inputSchema: accountInput,
+      annotations: { idempotentHint: true },
     },
     async (a) => {
       const r = await upsertAccount(a);
@@ -495,6 +496,7 @@ export function createServer({ store }: ServerOptions): McpServer {
           )
           .default([]),
       }),
+      annotations: { idempotentHint: true },
     },
     async ({ month, balances, incomes }) => {
       if (!isMonthKey(month)) return fail('month must be YYYY-MM');
@@ -579,6 +581,7 @@ export function createServer({ store }: ServerOptions): McpServer {
         category: z.string().optional(),
         note: z.string().optional(),
       }),
+      annotations: { idempotentHint: true },
     },
     async (b) => {
       const st = await store.load();
@@ -750,45 +753,63 @@ export function createServer({ store }: ServerOptions): McpServer {
   );
 
   // ---------------------------------------------------------- simulations
+  const homeScenarioSchema = z.object(scenarioInput);
+  async function runHomeScenario(a: z.infer<typeof homeScenarioSchema>, save: boolean) {
+    const st = await store.load();
+    const cu: Record<string, number> = {};
+    for (const x of a.capitalUse) {
+      const m = findMember(st, x.member);
+      if (!m) return fail(`Unknown member "${x.member}".`);
+      cu[m.id] = x.share;
+    }
+    const prev = a.id ? st.scenarios.find((s) => s.id === a.id) : undefined;
+    const sc: HomeScenario = { ...(prev ?? {}), ...a, id: a.id ?? newId('home'), capitalUse: { ...(prev?.capitalUse ?? {}), ...cu } };
+    if (save) await store.upsertScenario(sc);
+    const { st: s2, L, c } = await load();
+    const r = simulateHome(s2, c, sc);
+    const T = t(L).home;
+    const cur = c.currency;
+    const lines = [
+      `## ${sc.name}: ${money(sc.price, cur, L)}`,
+      `${T.totalCost}: ${money(r.totalCost, cur, L)} (agency ${money(r.agencyFee, cur, L)}, other costs ${money(r.closingCosts, cur, L)}).`,
+      `${T.ownFunds}: ${money(r.ownFunds, cur, L)} + ${T.familyHelp.toLowerCase()} ${money(r.familyHelp, cur, L)} → ${T.mortgage.toLowerCase()} ${money(r.mortgage, cur, L)} (LTV ${pct(r.ltv, L)}).`,
+      `${T.maxPayment}: ${money(r.maxPayment, cur, L)} (${pct(s2.settings.maxPaymentRatio, L)} of net income ${money(r.householdNetIncome, cur, L)}).`,
+      ...r.durations.map(
+        (d) => `- ${d.years} ${T.years}: ${money(d.payment, cur, L)}/month (${pct(d.paymentRatio, L)} of income) → ${d.affordable === null ? '?' : d.affordable ? T.affordable : T.notAffordable}; interest ${money(d.totalInterest, cur, L)}; ${T.maxPrice.toLowerCase()} ${money(d.maxPriceWithSavings, cur, L)}`,
+      ),
+      `${T.reserve}: ${money(r.reserve, cur, L)} = ${num(r.reserveMonths, L, 1)} months of spending (target ${r.reserveTarget}).`,
+      ...r.flags.map((f) => `⚠ ${T.flags[f]}`),
+      save ? `Saved as scenario "${sc.id}".` : 'Not saved. Call conti_save_home_scenario to keep it in the dashboard.',
+    ];
+    return ok(lines.join('\n'), { tab: 'home', scenarioId: save ? sc.id : null, result: r as unknown as Record<string, unknown> });
+  }
+
   registerAppTool(
     server,
     'conti_home_scenario',
     {
       title: 'Home purchase scenario',
       description:
-        'Simulate buying a home with the household’s real numbers: own funds from liquid wealth, family help, agency fee + VAT, closing costs, mortgage needed, payment for 20/25/30 years vs a sustainable share of net income, maximum affordable price, reserve left for emergencies. Set save=true to keep the scenario in the dashboard.',
-      inputSchema: z.object({ ...scenarioInput, save: z.boolean().default(false) }),
+        'Simulate buying a home with the household’s real numbers: own funds from liquid wealth, family help, agency fee + VAT, closing costs, mortgage needed, payment for 20/25/30 years vs a sustainable share of net income, maximum affordable price, reserve left for emergencies. Read-only: it does not save. To keep a scenario in the dashboard, call conti_save_home_scenario.',
+      inputSchema: homeScenarioSchema,
+      annotations: { readOnlyHint: true },
       _meta: { ui: { resourceUri: UI_URI } },
     },
-    async ({ save, capitalUse, ...a }) => {
-      const st = await store.load();
-      const cu: Record<string, number> = {};
-      for (const x of capitalUse) {
-        const m = findMember(st, x.member);
-        if (!m) return fail(`Unknown member "${x.member}".`);
-        cu[m.id] = x.share;
-      }
-      const prev = a.id ? st.scenarios.find((s) => s.id === a.id) : undefined;
-      const sc: HomeScenario = { ...(prev ?? {}), ...a, id: a.id ?? newId('home'), capitalUse: { ...(prev?.capitalUse ?? {}), ...cu } };
-      if (save) await store.upsertScenario(sc);
-      const { st: s2, L, c } = await load();
-      const r = simulateHome(s2, c, sc);
-      const T = t(L).home;
-      const cur = c.currency;
-      const lines = [
-        `## ${sc.name}: ${money(sc.price, cur, L)}`,
-        `${T.totalCost}: ${money(r.totalCost, cur, L)} (agency ${money(r.agencyFee, cur, L)}, other costs ${money(r.closingCosts, cur, L)}).`,
-        `${T.ownFunds}: ${money(r.ownFunds, cur, L)} + ${T.familyHelp.toLowerCase()} ${money(r.familyHelp, cur, L)} → ${T.mortgage.toLowerCase()} ${money(r.mortgage, cur, L)} (LTV ${pct(r.ltv, L)}).`,
-        `${T.maxPayment}: ${money(r.maxPayment, cur, L)} (${pct(s2.settings.maxPaymentRatio, L)} of net income ${money(r.householdNetIncome, cur, L)}).`,
-        ...r.durations.map(
-          (d) => `- ${d.years} ${T.years}: ${money(d.payment, cur, L)}/month (${pct(d.paymentRatio, L)} of income) → ${d.affordable === null ? '?' : d.affordable ? T.affordable : T.notAffordable}; interest ${money(d.totalInterest, cur, L)}; ${T.maxPrice.toLowerCase()} ${money(d.maxPriceWithSavings, cur, L)}`,
-        ),
-        `${T.reserve}: ${money(r.reserve, cur, L)} = ${num(r.reserveMonths, L, 1)} months of spending (target ${r.reserveTarget}).`,
-        ...r.flags.map((f) => `⚠ ${T.flags[f]}`),
-        save ? `Saved as scenario "${sc.id}".` : 'Not saved (pass save=true to keep it).',
-      ];
-      return ok(lines.join('\n'), { tab: 'home', scenarioId: save ? sc.id : null, result: r as unknown as Record<string, unknown> });
+    async (a) => runHomeScenario(a, false),
+  );
+
+  registerAppTool(
+    server,
+    'conti_save_home_scenario',
+    {
+      title: 'Save a home purchase scenario',
+      description:
+        'Run a home purchase simulation and save it to the dashboard (upsert by id). Same inputs as conti_home_scenario; call this only when the user wants to keep the scenario.',
+      inputSchema: homeScenarioSchema,
+      annotations: { idempotentHint: true },
+      _meta: { ui: { resourceUri: UI_URI } },
     },
+    async (a) => runHomeScenario(a, true),
   );
 
   server.registerTool(

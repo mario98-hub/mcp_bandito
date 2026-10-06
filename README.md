@@ -127,7 +127,7 @@ You can also type the numbers into the **Month** tab of the dashboard.
 | `conti_record_month` / `conti_delete_entries` | Save or fix a month's balances and incomes |
 | `conti_upsert_budget_item` / `conti_delete_budget_item` | Fixed monthly/yearly costs and planned savings |
 | `conti_update_settings` | Tax on gains, emergency-fund target, max mortgage ratio, optional modules, monthly reminder, language, currency |
-| `conti_home_scenario` / `conti_delete_home_scenario` | Home purchase simulation (opens the Home tab) |
+| `conti_home_scenario` / `conti_save_home_scenario` / `conti_delete_home_scenario` | Home purchase simulation (read-only); save a scenario; delete one (opens the Home tab) |
 | `conti_simulate_purchase` | "Can I afford it?" for any purchase (opens the Purchase tab) |
 | `conti_purchase_budget` | "How much can I spend?" in cash or with financing (opens the Purchase tab) |
 | `conti_export` / `conti_import` | JSON backup and restore; also imports backups from the original "Conti congiunti" Claude artifact |
