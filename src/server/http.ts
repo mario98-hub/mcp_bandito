@@ -13,6 +13,7 @@ import { createMcpHandler } from '@modelcontextprotocol/server';
 import { timingSafeEqual } from 'node:crypto';
 import type { Store } from '../store/store.js';
 import { createServer, VERSION } from './server.js';
+import { RACCOON_BADGE_SVG } from '../core/brand.js';
 
 export interface HttpOptions {
   store: Store;
@@ -40,6 +41,12 @@ export function startHttp(o: HttpOptions) {
   app.get('/', (_req, res) => {
     res.type('text/plain').send('Conti MCP server. Endpoint: /mcp' + (o.token ? '/<token> or /mcp with Authorization: Bearer <token>' : ''));
   });
+
+  // Serve the raccoon mark at the connector's domain, so hosts that pick the
+  // icon from the URL's favicon get the raccoon, not the deploy platform's.
+  const sendIcon = (res: express.Response) =>
+    res.type('image/svg+xml').set('Cache-Control', 'public, max-age=86400').send(RACCOON_BADGE_SVG);
+  app.get(['/favicon.svg', '/favicon.ico', '/icon.svg'], (_req, res) => sendIcon(res));
 
   const authorized = (req: express.Request) => {
     if (!o.token) return true;

@@ -25,6 +25,7 @@ import {
 import { SHARED, type Account, type Goal, type HomeScenario, type Locale, type State } from '../core/types.js';
 import { t, money, pct, num, monthLabel } from '../core/i18n.js';
 import { fromLegacy, isLegacyBackup } from '../core/legacy.js';
+import { RACCOON_ICON_DATA_URI } from '../core/brand.js';
 import { buildView } from './view.js';
 
 export const VERSION = '0.2.0';
@@ -183,7 +184,18 @@ export interface ServerOptions {
 }
 
 export function createServer({ store }: ServerOptions): McpServer {
-  const server = new McpServer({ name: 'conti', title: 'Conti', version: VERSION }, { instructions: INSTRUCTIONS });
+  const server = new McpServer(
+    {
+      name: 'conti',
+      title: 'Conti',
+      version: VERSION,
+      websiteUrl: 'https://github.com/mario98-hub/mcp_bandito',
+      // The raccoon mark, so hosts show it as the connector icon instead of
+      // falling back to the deploy domain's favicon (e.g. Render).
+      icons: [{ src: RACCOON_ICON_DATA_URI, mimeType: 'image/svg+xml', sizes: ['any'] }],
+    },
+    { instructions: INSTRUCTIONS },
+  );
   const load = async () => {
     const st = await store.load();
     const L: Locale = st.household?.locale ?? 'en';

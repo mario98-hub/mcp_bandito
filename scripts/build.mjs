@@ -18,7 +18,11 @@ const out = await build({
   platform: 'browser',
 });
 const js = out.outputFiles[0].text.replace(/<\/script/gi, '<\\/script');
-const html = readFileSync('src/ui/index.html', 'utf8').replace('/*__APP__*/', () => js);
+const { RACCOON_ICON_DATA_URI } = await import('../dist/core/brand.js');
+const favicon = `<link rel="icon" href="${RACCOON_ICON_DATA_URI}">`;
+const html = readFileSync('src/ui/index.html', 'utf8')
+  .replace('<!--__FAVICON__-->', () => favicon)
+  .replace('/*__APP__*/', () => js);
 mkdirSync('dist/ui', { recursive: true });
 writeFileSync('dist/ui/index.html', html);
 chmodSync('dist/cli.js', 0o755);
