@@ -187,6 +187,14 @@ ul.reasons { margin: 10px 0 0; padding-left: 18px; font-size: 14px; }
 .foot svg { width: 14px; height: 14px; flex: none; }
 .empty-state { text-align: left; padding: 8px 0; }
 .empty-state p { max-width: 60ch; }
+.onboarding .ob-steps { list-style: none; margin: 16px 0 10px; padding: 0; display: grid; gap: 8px; max-width: 440px; }
+.ob-step { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; background: var(--surface); border: 1px solid transparent; }
+.ob-step.next { border-color: var(--accent); }
+.ob-mark { flex: none; width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-family: "Big Shoulders Display", sans-serif; font-weight: 800; font-size: 14px; background: var(--surface-2); color: var(--muted); }
+.ob-step.done .ob-mark { background: var(--ok); color: var(--surface); }
+.ob-step.next .ob-mark { background: var(--accent); color: var(--on-accent); }
+.ob-label { font-size: 14.5px; font-weight: 500; }
+.ob-step.done .ob-label { color: var(--muted); }
 @media (max-width: 480px) {
   .band-row, .hero, main { padding-left: 14px; padding-right: 14px; }
   .tabs { padding-left: 10px; }

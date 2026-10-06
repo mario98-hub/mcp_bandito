@@ -10,15 +10,17 @@ import { App } from '@modelcontextprotocol/ext-apps';
 import {
   compute,
   isNum,
+  onboardingNext,
   simulateHome,
   simulatePurchase,
   nextKey,
   prevKey,
   type Computed,
   type HomeResult,
+  type OnboardingNext,
   type PurchaseInput,
 } from '../core/engine.js';
-import { SHARED, type HomeScenario, type Locale, type State, type Account } from '../core/types.js';
+import { SHARED, emptyState, type HomeScenario, type Locale, type State, type Account } from '../core/types.js';
 import { t, money, pct, num, monthLabel, MONTH_NAMES, type Strings } from '../core/i18n.js';
 import { demoState } from '../core/demo.js';
 
@@ -181,8 +183,34 @@ function band(setUp: boolean) {
 
 function onboarding() {
   const O = T().onboarding;
-  return `<section class="empty-state"><h2>${esc(O.title)}</h2><p>${esc(O.body)}</p>
-  <button class="btn accent" data-ask="${esc(O.ctaPrompt)}">${ICON_CHAT}${esc(O.cta)}</button></section>`;
+  const labels = T().onboardingSteps;
+  const o = onboardingNext(S.state!);
+  const optional = L() === 'it' ? 'facoltativo' : 'optional';
+  const items = o.steps
+    .map((s) => {
+      const isNext = o.next?.id === s.id;
+      return `<li class="ob-step${s.done ? ' done' : ''}${isNext ? ' next' : ''}">
+        <span class="ob-mark" aria-hidden="true">${s.done ? '✓' : s.n}</span>
+        <span class="ob-label">${esc(labels[s.id])}${s.optional ? ` <small class="muted">(${esc(optional)})</small>` : ''}</span>
+      </li>`;
+    })
+    .join('');
+  const done = o.steps.filter((s) => s.done).length;
+  const fresh = done === 0;
+  const btn = fresh ? O.cta : L() === 'it' ? 'Continua con Claude' : 'Continue with Claude';
+  const prompt = fresh ? O.ctaPrompt : onboardingPrompt(o);
+  return `<section class="empty-state onboarding"><h2>${esc(O.title)}</h2><p>${esc(O.body)}</p>
+  <ol class="ob-steps" aria-label="${esc(L() === 'it' ? 'Passi di configurazione' : 'Setup steps')}">${items}</ol>
+  <p class="sub">${done}/${o.steps.length} ${esc(L() === 'it' ? 'completati' : 'done')}</p>
+  <button class="btn accent" data-ask="${esc(prompt)}">${ICON_CHAT}${esc(btn)}</button></section>`;
+}
+
+function onboardingPrompt(o: OnboardingNext) {
+  if (!o.next) return T().onboarding.ctaPrompt;
+  const label = T().onboardingSteps[o.next.id];
+  return L() === 'it'
+    ? `Continuiamo a configurare Conti. Il prossimo passo è "${label}". Guidami tu, una domanda alla volta.`
+    : `Let's continue setting up Conti. The next step is "${label}". Guide me, one question at a time.`;
 }
 
 function renderTab() {
@@ -681,7 +709,7 @@ async function saveHome() {
       if (!d.id) d.id = 'h' + Date.now();
       S.state!.scenarios = [...S.state!.scenarios.filter((s) => s.id !== d.id), structuredClone(d)];
     } else {
-      const r = await callTool('conti_home_scenario', {
+      const r = await callTool('conti_save_home_scenario', {
         id: d.id || undefined,
         name: d.name,
         price: d.price,
@@ -693,7 +721,6 @@ async function saveHome() {
         capitalUse: Object.entries(d.capitalUse).map(([member, share]) => ({ member, share })),
         sharedCapitalUse: d.sharedCapitalUse,
         durations: d.durations,
-        save: true,
       });
       const id = (r.structuredContent as { scenarioId?: string } | undefined)?.scenarioId;
       if (id) d.id = id;
@@ -1013,9 +1040,12 @@ function startDemo() {
   S.demo = true;
   const d = new Date();
   S.today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-  S.state = demoState(S.today);
   const q = new URLSearchParams(location.search);
-  if (q.get('lang') === 'it' && S.state.household) S.state.household.locale = 'it';
+  S.state = q.has('empty') ? emptyState() : demoState(S.today);
+  if (q.get('lang') === 'it') {
+    S.hostLocale = 'it';
+    if (S.state.household) S.state.household.locale = 'it';
+  }
   if (q.get('tab')) S.tab = q.get('tab') as Tab;
   if (q.get('theme') === 'dark' || q.get('theme') === 'light') document.documentElement.dataset.theme = q.get('theme')!;
   render();
