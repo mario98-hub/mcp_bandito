@@ -45,8 +45,9 @@ How to help the user:
 - First time (conti_get_overview says "not set up"): run the guided setup. Call conti_onboarding to get the next step, then work through it: who is in the household and their main goal (conti_setup, conti_set_goal), the accounts and the monthly income (conti_setup / conti_record_month), then show the first dashboard. Call conti_onboarding again after each step to get the next one; steps 6-7 (goal details, monthly reminder) are optional.
 - Goals: the primary goal shapes the dashboard and the tone. Use conti_set_goal to create or update it and to set a target amount/date or link the accounts that count towards it. conti_get_overview reports each goal's progress and estimated date.
 - Monthly routine: the user sends screenshots or numbers. Read every balance (and unrealized gain for investment accounts, if shown) and each person's net pay, then call conti_record_month. If a figure is ambiguous, ask before saving. After saving, mention what is still missing for that month.
-- Questions about money ("can we afford…", "how much can we spend", "how are we doing", "how much do we save"): call conti_get_overview, conti_health_check, conti_simulate_purchase, conti_purchase_budget or conti_home_scenario and answer with the numbers. Explain the reasoning in plain words so the user learns, and say which assumptions matter. You are not a licensed advisor: give information and trade-offs, not orders.
-- Show the dashboard (conti_dashboard) when a visual helps, e.g. after recording a month or when asked "show me".
+- Questions about money ("can we afford…", "how much can we spend", "how are we doing", "how much do we save"): call conti_get_overview, conti_health_check, conti_simulate_purchase, conti_purchase_budget or conti_home_scenario and answer with the numbers. These tools are read-only and answer in plain text — call them directly, there is no interface to open and nothing to confirm first. Explain the reasoning in plain words so the user learns, and say which assumptions matter. You are not a licensed advisor: give information and trade-offs, not orders.
+- Show the dashboard (conti_dashboard) only when a visual helps and the user wants it, e.g. after recording a month or when asked "show me". conti_dashboard is the one tool that opens an interface; everything else works in text.
+- Undo: destructive tools (deletes, import, conti_delete_all) take an automatic snapshot first, so conti_undo restores the state from before the last one if the user changes their mind.
 Amounts are in the household currency. Debts are negative balances. Month keys are YYYY-MM.`;
 
 // ----------------------------------------------------------------- helpers
@@ -796,22 +797,19 @@ export function createServer({ store }: ServerOptions): McpServer {
     return ok(lines.join('\n'), { tab: 'home', scenarioId: save ? sc.id : null, result: r as unknown as Record<string, unknown> });
   }
 
-  registerAppTool(
-    server,
+  server.registerTool(
     'conti_home_scenario',
     {
       title: 'Home purchase scenario',
       description:
-        'Simulate buying a home with the household’s real numbers: own funds from liquid wealth, family help, agency fee + VAT, closing costs, mortgage needed, payment for 20/25/30 years vs a sustainable share of net income, maximum affordable price, reserve left for emergencies. Read-only: it does not save. To keep a scenario in the dashboard, call conti_save_home_scenario.',
+        'Simulate buying a home with the household’s real numbers: own funds from liquid wealth, family help, agency fee + VAT, closing costs, mortgage needed, payment for 20/25/30 years vs a sustainable share of net income, maximum affordable price, reserve left for emergencies. Read-only and text-only: it does not save and does not open an interface — call it directly to answer. To keep a scenario in the dashboard, call conti_save_home_scenario.',
       inputSchema: homeScenarioSchema,
       annotations: { readOnlyHint: true },
-      _meta: { ui: { resourceUri: UI_URI } },
     },
     async (a) => runHomeScenario(a, false),
   );
 
-  registerAppTool(
-    server,
+  server.registerTool(
     'conti_save_home_scenario',
     {
       title: 'Save a home purchase scenario',
@@ -819,7 +817,6 @@ export function createServer({ store }: ServerOptions): McpServer {
         'Run a home purchase simulation and save it to the dashboard (upsert by id). Same inputs as conti_home_scenario; call this only when the user wants to keep the scenario.',
       inputSchema: homeScenarioSchema,
       annotations: { idempotentHint: true },
-      _meta: { ui: { resourceUri: UI_URI } },
     },
     async (a) => runHomeScenario(a, true),
   );
@@ -835,13 +832,12 @@ export function createServer({ store }: ServerOptions): McpServer {
     async ({ id }) => ((await store.deleteScenario(id)) ? ok('Deleted.') : fail('Not found.')),
   );
 
-  registerAppTool(
-    server,
+  server.registerTool(
     'conti_simulate_purchase',
     {
       title: 'Can I afford it?',
       description:
-        'Check a purchase (car, sofa, holiday, renovation…) against the household’s real numbers: cash vs liquid funds, emergency fund after the purchase, loan payment and total interest, new monthly commitment as % of income, months of savings it costs, opportunity cost if the cash were invested. Returns a verdict (comfortable / stretch / risky) with reasons. Use it to teach, not to decide for the user.',
+        'Check a purchase (car, sofa, holiday, renovation…) against the household’s real numbers: cash vs liquid funds, emergency fund after the purchase, loan payment and total interest, new monthly commitment as % of income, months of savings it costs, opportunity cost if the cash were invested. Returns a verdict (comfortable / stretch / risky) with reasons. Read-only and text-only: call it directly to answer "can we afford…" questions, no interface to open. Use it to teach, not to decide for the user.',
       inputSchema: z.object({
         name: z.string().optional(),
         price: z.number().positive(),
@@ -853,7 +849,6 @@ export function createServer({ store }: ServerOptions): McpServer {
         horizonYears: z.number().min(1).max(40).optional(),
       }),
       annotations: { readOnlyHint: true },
-      _meta: { ui: { resourceUri: UI_URI } },
     },
     async (p) => {
       const { st, L, c } = await load();
@@ -873,20 +868,18 @@ export function createServer({ store }: ServerOptions): McpServer {
     },
   );
 
-  registerAppTool(
-    server,
+  server.registerTool(
     'conti_purchase_budget',
     {
       title: 'How much can I spend?',
       description:
-        'The reverse of "can I afford it?": how much the household could spend on a purchase while keeping the emergency fund intact — in cash, and (when a rate and duration are given) using financing up to a sustainable monthly payment. Use it when the user asks "how much can we spend on …" rather than naming a price.',
+        'The reverse of "can I afford it?": how much the household could spend on a purchase while keeping the emergency fund intact — in cash, and (when a rate and duration are given) using financing up to a sustainable monthly payment. Read-only and text-only: call it directly when the user asks "how much can we spend on …" rather than naming a price.',
       inputSchema: z.object({
         rate: z.number().min(0).max(0.5).optional().describe('Loan TAN/APR as a fraction, for the financed option'),
         years: z.number().min(0).max(30).optional().describe('Loan duration for the financed option'),
         monthlyRunningCost: z.number().min(0).optional().describe('Ongoing monthly cost the purchase would add (insurance, fuel…)'),
       }),
       annotations: { readOnlyHint: true },
-      _meta: { ui: { resourceUri: UI_URI } },
     },
     async (p) => {
       const { st, L, c } = await load();
@@ -948,6 +941,38 @@ export function createServer({ store }: ServerOptions): McpServer {
       await store.replaceAll(st);
       const { st: s2, L, c } = await load();
       return ok(`Imported ${s2.members.length} members, ${s2.accounts.length} accounts, ${s2.snapshots.length} balances, ${s2.incomes.length} incomes.\n\n${overviewText(s2, c, L)}`);
+    },
+  );
+
+  // ---------------------------------------------------------- safety net
+  server.registerTool(
+    'conti_undo',
+    {
+      title: 'Undo the last change',
+      description:
+        'Restore the automatic snapshot taken right before the last destructive operation (a delete, conti_delete_all or conti_import). Each call steps one operation further back. Use it when the user regrets a deletion or a bad import. Note: this replaces the current data with the earlier snapshot.',
+      inputSchema: z.object({}),
+    },
+    async () => {
+      const r = await store.restore();
+      if (!r) return fail('Nothing to undo: no snapshot is available.');
+      const { st, L, c } = await load();
+      return ok(`Undone "${r.action}" (snapshot from ${r.at}). ${r.remaining} undo step(s) left.\n\n${overviewText(st, c, L)}`, { restored: r });
+    },
+  );
+
+  server.registerTool(
+    'conti_delete_all',
+    {
+      title: 'Delete all my data',
+      description:
+        'Permanently delete the entire household — members, accounts, every month, budget, goals, scenarios and settings — for a clean slate or to erase your data. A snapshot is taken first, so conti_undo can still bring it back. Only call after the user explicitly confirms they want to erase everything.',
+      inputSchema: z.object({ confirm: z.literal(true) }),
+      annotations: { destructiveHint: true },
+    },
+    async () => {
+      await store.deleteAll();
+      return ok('Deleted all household data; the household is now empty. Call conti_undo to restore it if this was a mistake.');
     },
   );
 

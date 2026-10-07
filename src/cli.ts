@@ -41,9 +41,15 @@ Options:
   --demo            fill an empty database with fictional demo data
   --new-token       print a random secret for CONTI_TOKEN
 Env:
-  CONTI_TOKEN       required for --http on a non-local address
+  CONTI_TOKEN       secret for the /mcp/<token> link (self-host / testers)
   CONTI_DB_AUTH_TOKEN  auth token for a remote Turso database (or TURSO_AUTH_TOKEN)
-  CONTI_ALLOWED_HOSTS  comma-separated public hostnames (DNS-rebinding protection)`);
+  CONTI_ALLOWED_HOSTS  comma-separated public hostnames (DNS-rebinding protection)
+  CONTI_ALLOWED_ORIGINS  comma-separated browser Origin hostnames to allow
+
+Hosted (OAuth) — one address for everyone, each user isolated, login instead of a secret:
+  CONTI_OAUTH_ISSUER    enables OAuth; the Authorization Server issuer URL (an IdP)
+  CONTI_PUBLIC_URL      this server's public https URL (required with OAuth)
+  CONTI_OAUTH_AUDIENCE  expected token audience (default <CONTI_PUBLIC_URL>/mcp)`);
     return;
   }
   if (flag('new-token')) {
@@ -68,16 +74,41 @@ Env:
     const port = Number(opt('port') ?? process.env.PORT ?? 3333);
     const token = process.env.CONTI_TOKEN?.trim() || null;
     const local = ['127.0.0.1', 'localhost', '::1'].includes(host);
-    if (!token && !local && !flag('insecure-no-auth')) {
-      console.error('[conti] Refusing to listen on a public address without CONTI_TOKEN. Generate one with: npx conti-mcp --new-token');
+    const allowedHosts = process.env.CONTI_ALLOWED_HOSTS?.split(',').map((s) => s.trim()).filter(Boolean);
+    const allowedOrigins = process.env.CONTI_ALLOWED_ORIGINS?.split(',').map((s) => s.trim()).filter(Boolean);
+
+    // Hosted mode: delegate identity to an external OAuth Authorization Server.
+    // One address for everyone, each user isolated by tenant, no secret in the URL.
+    const issuer = process.env.CONTI_OAUTH_ISSUER?.trim();
+    let oauth: import('./server/http.js').OAuthRuntime | undefined;
+    if (issuer) {
+      const publicUrl = process.env.CONTI_PUBLIC_URL?.trim();
+      if (!publicUrl) {
+        console.error("[conti] CONTI_OAUTH_ISSUER requires CONTI_PUBLIC_URL (this server's public https URL, e.g. https://conti.example.com).");
+        process.exit(1);
+      }
+      const resourceServerUrl = new URL('/mcp', publicUrl);
+      const audience = process.env.CONTI_OAUTH_AUDIENCE?.trim() || resourceServerUrl.toString();
+      const { discoverOAuth } = await import('./server/oauth.js');
+      try {
+        const { metadata, verifier } = await discoverOAuth({ issuer, audience, resource: resourceServerUrl.toString() });
+        oauth = { verifier, metadata, resourceServerUrl, scopesSupported: ['openid', 'profile', 'email'] };
+        console.error(`[conti] OAuth enabled · issuer ${issuer} · resource ${resourceServerUrl.toString()}`);
+      } catch (e) {
+        console.error(`[conti] OAuth setup failed: ${(e as Error).message}`);
+        process.exit(1);
+      }
+    }
+
+    if (!token && !oauth && !local && !flag('insecure-no-auth')) {
+      console.error('[conti] Refusing to listen on a public address without auth. Set CONTI_OAUTH_ISSUER for hosted OAuth, or generate a secret with: npx conti-mcp --new-token');
       process.exit(1);
     }
     if (token && token.length < 24) {
       console.error('[conti] CONTI_TOKEN is too short (min 24 chars). Generate one with: npx conti-mcp --new-token');
       process.exit(1);
     }
-    const allowedHosts = process.env.CONTI_ALLOWED_HOSTS?.split(',').map((s) => s.trim()).filter(Boolean);
-    await startHttp({ store, host, port, token, allowedHosts });
+    await startHttp({ store, host, port, token, allowedHosts, allowedOrigins, oauth });
     console.error(`[conti] database: ${dbPath}`);
   } else {
     const { serveStdio } = await import('@modelcontextprotocol/server/stdio');
