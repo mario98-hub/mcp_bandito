@@ -84,7 +84,11 @@ https://your-host.example.com/mcp/<your-secret>
 
 Once added, it's available in claude.ai, the mobile apps and Claude Desktop. Step-by-step guide: [docs/deploy.md](docs/deploy.md).
 
-> The secret in the URL is the only key to your data: treat the URL like a password. OAuth is on the roadmap.
+> The secret in the URL is the only key to your data: treat the URL like a password, and generate it with `npx conti-mcp --new-token` so it is URL-safe.
+
+### Option C: hosted for everyone (OAuth login, no secret to share)
+
+For a non-technical user — or to list Conti in Claude's connector directory — run it **hosted with OAuth**: one public address, each person logs in, and every user's data is isolated by their login (no secret link to paste). Set `CONTI_OAUTH_ISSUER` (an identity provider) and `CONTI_PUBLIC_URL`; the server delegates login to the provider, verifies the token, and keeps each user private. The secret link above still works for you and testers. See [docs/deploy.md](docs/deploy.md#hosted-oauth--for-everyone-including-non-technical-users).
 
 **No-server, all-browser option (free):** host the data in [Turso](https://turso.tech) (managed libSQL, free tier) and deploy the server on Render straight from this repo — no local setup, no credit card.
 
@@ -131,10 +135,12 @@ You can also type the numbers into the **Month** tab of the dashboard.
 | `conti_record_month` / `conti_delete_entries` | Save or fix a month's balances and incomes |
 | `conti_upsert_budget_item` / `conti_delete_budget_item` | Fixed monthly/yearly costs and planned savings |
 | `conti_update_settings` | Tax on gains, emergency-fund target, max mortgage ratio, optional modules, monthly reminder, language, currency |
-| `conti_home_scenario` / `conti_save_home_scenario` / `conti_delete_home_scenario` | Home purchase simulation (read-only); save a scenario; delete one (opens the Home tab) |
-| `conti_simulate_purchase` | "Can I afford it?" for any purchase (opens the Purchase tab) |
-| `conti_purchase_budget` | "How much can I spend?" in cash or with financing (opens the Purchase tab) |
+| `conti_home_scenario` / `conti_save_home_scenario` / `conti_delete_home_scenario` | Home purchase simulation (read-only, text answer); save a scenario; delete one |
+| `conti_simulate_purchase` | "Can I afford it?" for any purchase (read-only, text answer) |
+| `conti_purchase_budget` | "How much can I spend?" in cash or with financing (read-only, text answer) |
 | `conti_export` / `conti_import` | JSON backup and restore; also imports backups from the original "Conti congiunti" Claude artifact |
+| `conti_undo` | Restore the automatic snapshot taken before the last delete/import |
+| `conti_delete_all` | Delete all household data (snapshot taken first, so `conti_undo` can recover) |
 
 ## Configuration
 
