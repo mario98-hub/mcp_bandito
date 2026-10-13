@@ -35,10 +35,21 @@ flowchart LR
    | `CONTI_OAUTH_ISSUER` | the provider's issuer URL (enables OAuth mode) |
    | `CONTI_PUBLIC_URL` | this server's public https URL, e.g. `https://conti.example.com` |
    | `CONTI_OAUTH_AUDIENCE` | expected token audience (defaults to `<CONTI_PUBLIC_URL>/mcp`) |
+   | `CONTI_HOUSEHOLD` | optional — OAuth accounts that **share one household** (see below) |
    | `CONTI_DB` / `CONTI_DB_AUTH_TOKEN` | the Turso database (one DB holds every user, isolated by tenant) |
 
    On start the server fetches the provider's metadata, so a wrong issuer fails fast. It then publishes its own discovery documents at `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-authorization-server`, and requires a valid login token on `/mcp`.
 3. **Give users the address.** They add `https://conti.example.com/mcp` once (or find it in the directory) and log in. Each user (OAuth subject) gets a private tenant; nobody sees anyone else's numbers.
+
+#### Shared household (a couple on one database)
+
+By default every login is isolated. To let two (or more) people — a couple sharing one household budget — see the **same** data while each logging in with their own account, list their accounts in `CONTI_HOUSEHOLD`:
+
+```
+CONTI_HOUSEHOLD="ada@ex.com, grace@ex.com"
+```
+
+Both of those logins then resolve to the shared `default` tenant — the *same* database the secret link uses — so the household's existing data is already there and either person reaches it via OAuth. Everyone **not** on the list keeps their own isolated tenant. Matching is on the provider's **verified email** claim; use `sub:<id>` to match an opaque subject instead, `=> name` to pick a tenant other than `default`, and `;` to configure more than one household. This is operator-configured (you edit the env var); self-service invites are a future option.
 
 ### Connector directory checklist
 

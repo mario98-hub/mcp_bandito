@@ -49,7 +49,11 @@ Env:
 Hosted (OAuth) — one address for everyone, each user isolated, login instead of a secret:
   CONTI_OAUTH_ISSUER    enables OAuth; the Authorization Server issuer URL (an IdP)
   CONTI_PUBLIC_URL      this server's public https URL (required with OAuth)
-  CONTI_OAUTH_AUDIENCE  expected token audience (default <CONTI_PUBLIC_URL>/mcp)`);
+  CONTI_OAUTH_AUDIENCE  expected token audience (default <CONTI_PUBLIC_URL>/mcp)
+  CONTI_HOUSEHOLD       OAuth accounts that share ONE household database, e.g.
+                        "ada@ex.com, grace@ex.com" (both → the shared default
+                        tenant). Separate groups with ';' and name a tenant with
+                        "=> name"; use "sub:<id>" to match by subject.`);
     return;
   }
   if (flag('new-token')) {
@@ -89,11 +93,13 @@ Hosted (OAuth) — one address for everyone, each user isolated, login instead o
       }
       const resourceServerUrl = new URL('/mcp', publicUrl);
       const audience = process.env.CONTI_OAUTH_AUDIENCE?.trim() || resourceServerUrl.toString();
-      const { discoverOAuth } = await import('./server/oauth.js');
+      const { discoverOAuth, parseHouseholds } = await import('./server/oauth.js');
+      // Let listed accounts (e.g. a couple) share one household DB; everyone else stays isolated.
+      const households = parseHouseholds(process.env.CONTI_HOUSEHOLD);
       try {
-        const { metadata, verifier } = await discoverOAuth({ issuer, audience, resource: resourceServerUrl.toString() });
+        const { metadata, verifier } = await discoverOAuth({ issuer, audience, resource: resourceServerUrl.toString(), households });
         oauth = { verifier, metadata, resourceServerUrl, scopesSupported: ['openid', 'profile', 'email'] };
-        console.error(`[conti] OAuth enabled · issuer ${issuer} · resource ${resourceServerUrl.toString()}`);
+        console.error(`[conti] OAuth enabled · issuer ${issuer} · resource ${resourceServerUrl.toString()}${households ? ' · shared households configured' : ''}`);
       } catch (e) {
         console.error(`[conti] OAuth setup failed: ${(e as Error).message}`);
         process.exit(1);

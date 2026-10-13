@@ -571,11 +571,11 @@ async function startFakeIdp() {
   });
 }
 
-function mintToken(privateKey, issuer, audience, sub) {
+function mintToken(privateKey, issuer, audience, sub, extra = {}) {
   const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
   const header = b64({ alg: 'RS256', kid: 'idp-key', typ: 'JWT' });
   const now = Math.floor(Date.now() / 1000);
-  const payload = b64({ iss: issuer, aud: audience, sub, iat: now, exp: now + 3600, scope: 'openid' });
+  const payload = b64({ iss: issuer, aud: audience, sub, iat: now, exp: now + 3600, scope: 'openid', ...extra });
   const sig = cryptoSign('sha256', Buffer.from(`${header}.${payload}`), privateKey).toString('base64url');
   return `${header}.${payload}.${sig}`;
 }
@@ -587,7 +587,15 @@ test('http: OAuth mode — discovery, 401 challenge, per-user isolation, secret 
   const audience = `${publicUrl}/mcp`;
   const secret = 'secret-token-0123456789abcdefghij';
   const p = spawn(process.execPath, ['dist/cli.js', '--http', '--port', String(port), '--host', '127.0.0.1', '--db', join(dir, 'oauth.db')], {
-    env: { ...process.env, CONTI_OAUTH_ISSUER: idp.issuer, CONTI_PUBLIC_URL: publicUrl, CONTI_OAUTH_AUDIENCE: audience, CONTI_TOKEN: secret },
+    env: {
+      ...process.env,
+      CONTI_OAUTH_ISSUER: idp.issuer,
+      CONTI_PUBLIC_URL: publicUrl,
+      CONTI_OAUTH_AUDIENCE: audience,
+      CONTI_TOKEN: secret,
+      // Two OAuth accounts that share ONE household (the shared `default` tenant).
+      CONTI_HOUSEHOLD: 'mario@ex.com, sofia@ex.com',
+    },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   await new Promise((res, rej) => {
@@ -595,7 +603,7 @@ test('http: OAuth mode — discovery, 401 challenge, per-user isolation, secret 
     p.on('exit', (code) => rej(new Error('server exited ' + code)));
     setTimeout(() => rej(new Error('timeout')), 8000);
   });
-  const bearer = (sub) => ({ requestInit: { headers: { Authorization: `Bearer ${mintToken(idp.privateKey, idp.issuer, audience, sub)}` } } });
+  const bearer = (sub, extra) => ({ requestInit: { headers: { Authorization: `Bearer ${mintToken(idp.privateKey, idp.issuer, audience, sub, extra)}` } } });
   try {
     // Discovery documents are published and point back at the Authorization Server.
     const prm = await fetch(`${publicUrl}/.well-known/oauth-protected-resource/mcp`).then((r) => r.json());
@@ -630,6 +638,34 @@ test('http: OAuth mode — discovery, 401 challenge, per-user isolation, secret 
     r = await self.callTool({ name: 'conti_get_overview', arguments: {} });
     assert.equal(r.structuredContent.setUp, false);
     await self.close();
+
+    // Shared household: two DIFFERENT OAuth accounts on the allowlist use ONE database.
+    // Mario (a distinct subject) logs in and sets up the household.
+    const mario = new Client({ name: 'test', version: '1.0.0' });
+    await mario.connect(new StreamableHTTPClientTransport(new URL(`${publicUrl}/mcp`), bearer('mario-sub', { email: 'mario@ex.com' })));
+    await mario.callTool({ name: 'conti_setup', arguments: { name: 'Casa-Pedol', members: [{ name: 'Mario' }] } });
+    await mario.close();
+
+    // Sofia (a different subject, same allowlisted household) sees Mario's data.
+    const sofia = new Client({ name: 'test', version: '1.0.0' });
+    await sofia.connect(new StreamableHTTPClientTransport(new URL(`${publicUrl}/mcp`), bearer('sofia-sub', { email: 'sofia@ex.com' })));
+    r = await sofia.callTool({ name: 'conti_get_overview', arguments: {} });
+    assert.match(text(r), /Casa-Pedol/);
+    await sofia.close();
+
+    // The shared household maps to `default`, so the secret link now sees it too.
+    const self2 = new Client({ name: 'test', version: '1.0.0' });
+    await self2.connect(new StreamableHTTPClientTransport(new URL(`${publicUrl}/mcp/${secret}`)));
+    r = await self2.callTool({ name: 'conti_get_overview', arguments: {} });
+    assert.match(text(r), /Casa-Pedol/);
+    await self2.close();
+
+    // A non-listed OAuth user (Bob) is still isolated from the shared household.
+    const bob2 = new Client({ name: 'test', version: '1.0.0' });
+    await bob2.connect(new StreamableHTTPClientTransport(new URL(`${publicUrl}/mcp`), bearer('bob')));
+    r = await bob2.callTool({ name: 'conti_get_overview', arguments: {} });
+    assert.equal(r.structuredContent.setUp, false);
+    await bob2.close();
   } finally {
     p.kill();
     idp.server.close();

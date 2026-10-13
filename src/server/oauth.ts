@@ -39,11 +39,56 @@ export interface JwtVerifierConfig {
   resource?: string;
   /** JWKS cache TTL in ms (remote only). Default 10 minutes. */
   jwksTtlMs?: number;
+  /** Map listed identities onto a shared household tenant; others keep their personal tenant. */
+  households?: HouseholdResolver;
 }
 
 /** Stable, opaque tenant id for an authenticated user: `u:` + a hash of issuer + subject. */
 export function tenantForUser(issuer: string, subject: string): string {
   return 'u:' + createHash('sha256').update(`${issuer}\n${subject}`).digest('base64url').slice(0, 24);
+}
+
+/**
+ * Decide whether an authenticated identity belongs to a *shared* household
+ * tenant. Returns the shared tenant id, or undefined to fall back to the user's
+ * own personal tenant. This is how a couple (or any fixed group) shares one
+ * database under OAuth: the operator lists their accounts and they all resolve
+ * to the same tenant instead of each getting an isolated one.
+ */
+export type HouseholdResolver = (id: { iss: string; sub: string; email?: string }) => string | undefined;
+
+/**
+ * Parse a household allowlist spec into a {@link HouseholdResolver}. Groups are
+ * separated by `;`; each group is `member, member, … => tenant`, where the
+ * `=> tenant` part is optional and defaults to the shared `default` tenant (the
+ * same database the self-host / secret-link path uses, so existing data is kept).
+ * A member is a **verified** email address, or `sub:<subject>` to match the
+ * opaque OAuth subject directly when no email claim is available.
+ *
+ *   "ada@ex.com, grace@ex.com"            → both share the `default` tenant
+ *   "ada@ex.com, grace@ex.com => casa"    → both share a tenant named `casa`
+ *   "sub:abc123 => casa; dana@ex.com => casa"
+ *
+ * Returns undefined when the spec is empty, so the caller can skip it entirely.
+ */
+export function parseHouseholds(spec: string | undefined): HouseholdResolver | undefined {
+  if (!spec || !spec.trim()) return undefined;
+  const byEmail = new Map<string, string>();
+  const bySub = new Map<string, string>();
+  for (const group of spec.split(';')) {
+    if (!group.trim()) continue;
+    const arrow = group.indexOf('=>');
+    const membersPart = arrow >= 0 ? group.slice(0, arrow) : group;
+    const tenant = (arrow >= 0 ? group.slice(arrow + 2) : '').trim() || DEFAULT_TENANT;
+    for (const raw of membersPart.split(',')) {
+      const m = raw.trim();
+      if (!m) continue;
+      if (/^sub:/i.test(m)) bySub.set(m.slice(4).trim(), tenant);
+      else byEmail.set(m.toLowerCase(), tenant);
+    }
+  }
+  if (!byEmail.size && !bySub.size) return undefined;
+  return ({ sub, email }) => (email ? byEmail.get(email.toLowerCase()) : undefined) ?? bySub.get(sub);
 }
 
 /** The tenant an authenticated request belongs to; the default tenant for the self-host / secret-link path. */
@@ -124,6 +169,10 @@ export function createJwtVerifier(cfg: JwtVerifierConfig): OAuthTokenVerifier {
       const scopes =
         typeof claims.scope === 'string' ? claims.scope.split(' ').filter(Boolean) : Array.isArray(claims.scopes) ? (claims.scopes as string[]) : [];
       const resource = cfg.resource ?? cfg.audience;
+      const iss = typeof claims.iss === 'string' ? claims.iss : cfg.issuer;
+      const email = typeof claims.email === 'string' ? claims.email : undefined;
+      // A listed identity joins a shared household; everyone else is isolated in their own tenant.
+      const tenant = cfg.households?.({ iss, sub, email }) ?? tenantForUser(cfg.issuer, sub);
       return {
         token,
         clientId: String(claims.client_id ?? claims.azp ?? claims.cid ?? sub),
@@ -132,10 +181,10 @@ export function createJwtVerifier(cfg: JwtVerifierConfig): OAuthTokenVerifier {
         resource: resource ? new URL(resource) : undefined,
         extra: {
           sub,
-          iss: typeof claims.iss === 'string' ? claims.iss : cfg.issuer,
+          iss,
           email: claims.email,
           name: claims.name,
-          tenant: tenantForUser(cfg.issuer, sub),
+          tenant,
         },
       };
     },
@@ -149,6 +198,8 @@ export interface OAuthServerConfig {
   audience?: string;
   /** Resource id stamped on AuthInfo.resource; defaults to `audience`. */
   resource?: string;
+  /** Map listed identities onto a shared household tenant (couples sharing one DB). */
+  households?: HouseholdResolver;
 }
 
 /**
@@ -177,6 +228,6 @@ export async function discoverOAuth(cfg: OAuthServerConfig): Promise<{ metadata:
   const jwksUri = metadata.jwks_uri;
   if (typeof jwksUri !== 'string') throw new Error(`OAuth metadata for ${cfg.issuer} has no jwks_uri`);
   const issuer = typeof metadata.issuer === 'string' ? metadata.issuer : cfg.issuer;
-  const verifier = createJwtVerifier({ issuer, jwks: { uri: jwksUri }, audience: cfg.audience, resource: cfg.resource });
+  const verifier = createJwtVerifier({ issuer, jwks: { uri: jwksUri }, audience: cfg.audience, resource: cfg.resource, households: cfg.households });
   return { metadata: metadata as unknown as OAuthMetadata, verifier };
 }

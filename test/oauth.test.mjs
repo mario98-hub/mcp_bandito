@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign as cryptoSign } from 'node:crypto';
-import { createJwtVerifier, tenantForUser, tenantOf } from '../dist/server/oauth.js';
+import { createJwtVerifier, parseHouseholds, tenantForUser, tenantOf } from '../dist/server/oauth.js';
 import { DEFAULT_TENANT } from '../dist/store/store.js';
 
 const ISSUER = 'https://auth.example.com';
@@ -47,6 +47,44 @@ test('oauth: different subjects get different tenants, same subject is stable', 
   const a2 = await verifier.verifyAccessToken(mintJwt({ sub: 'alice' }));
   assert.notEqual(a.extra.tenant, b.extra.tenant);
   assert.equal(a.extra.tenant, a2.extra.tenant);
+});
+
+test('oauth: parseHouseholds maps listed emails/subs to a shared tenant, others to none', () => {
+  assert.equal(parseHouseholds(undefined), undefined);
+  assert.equal(parseHouseholds('   '), undefined);
+
+  // bare list → the shared default tenant; matching is case-insensitive on email
+  const def = parseHouseholds('ada@ex.com, Grace@Ex.com');
+  assert.equal(def({ iss: ISSUER, sub: 'a', email: 'ADA@ex.com' }), DEFAULT_TENANT);
+  assert.equal(def({ iss: ISSUER, sub: 'b', email: 'grace@ex.com' }), DEFAULT_TENANT);
+  assert.equal(def({ iss: ISSUER, sub: 'c', email: 'stranger@ex.com' }), undefined);
+  assert.equal(def({ iss: ISSUER, sub: 'd' }), undefined); // no email, no sub match
+
+  // named tenants, multiple groups, and sub: matching when there is no email
+  const multi = parseHouseholds('ada@ex.com, bob@ex.com => casa; sub:xyz => casa; dana@ex.com => altra');
+  assert.equal(multi({ iss: ISSUER, sub: '1', email: 'bob@ex.com' }), 'casa');
+  assert.equal(multi({ iss: ISSUER, sub: 'xyz' }), 'casa');
+  assert.equal(multi({ iss: ISSUER, sub: '2', email: 'dana@ex.com' }), 'altra');
+  assert.equal(multi({ iss: ISSUER, sub: '3', email: 'nobody@ex.com' }), undefined);
+});
+
+test('oauth: a verifier with a household allowlist shares a tenant across subjects', async () => {
+  const shared = createJwtVerifier({
+    issuer: ISSUER,
+    jwks: { keys: [jwk] },
+    audience: AUD,
+    households: parseHouseholds('ada@ex.com, grace@ex.com'),
+  });
+  // two DIFFERENT subjects, both on the allowlist → the same (default) tenant
+  const ada = await shared.verifyAccessToken(mintJwt({ sub: 'subject-ada', email: 'ada@ex.com' }));
+  const grace = await shared.verifyAccessToken(mintJwt({ sub: 'subject-grace', email: 'grace@ex.com' }));
+  assert.equal(ada.extra.tenant, DEFAULT_TENANT);
+  assert.equal(grace.extra.tenant, DEFAULT_TENANT);
+  assert.equal(tenantOf(ada), tenantOf(grace));
+  // a non-listed user keeps their own isolated tenant
+  const other = await shared.verifyAccessToken(mintJwt({ sub: 'subject-x', email: 'x@ex.com' }));
+  assert.equal(other.extra.tenant, tenantForUser(ISSUER, 'subject-x'));
+  assert.notEqual(other.extra.tenant, DEFAULT_TENANT);
 });
 
 test('oauth: rejects expired, wrong-issuer, wrong-audience, unknown-key and tampered tokens', async () => {

@@ -90,6 +90,8 @@ Once added, it's available in claude.ai, the mobile apps and Claude Desktop. Ste
 
 For a non-technical user — or to list Conti in Claude's connector directory — run it **hosted with OAuth**: one public address, each person logs in, and every user's data is isolated by their login (no secret link to paste). Set `CONTI_OAUTH_ISSUER` (an identity provider) and `CONTI_PUBLIC_URL`; the server delegates login to the provider, verifies the token, and keeps each user private. The secret link above still works for you and testers. See [docs/deploy.md](docs/deploy.md#hosted-oauth--for-everyone-including-non-technical-users).
 
+A couple who share one budget can both log in with their own account and still see the **same** household: list their emails in `CONTI_HOUSEHOLD` (e.g. `"ada@ex.com, grace@ex.com"`) and both logins resolve to the shared database; everyone else stays isolated.
+
 **No-server, all-browser option (free):** host the data in [Turso](https://turso.tech) (managed libSQL, free tier) and deploy the server on Render straight from this repo — no local setup, no credit card.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/mario98-hub/mcp_bandito)
